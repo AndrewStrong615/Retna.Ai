@@ -22,13 +22,22 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `data.py`: label loading, patient-level split, normalization stats, augmentation, Dataset class.
 - `train.py`: training loop (AdamW, warmup + cosine LR, mixed precision, pos_weight for class imbalance),
   validation AUC and specificity at a target sensitivity, best-checkpoint saving, final test evaluation.
+- `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
+  Its docstring has the smoke-test commands.
+- `requirements.txt`: dependencies, with the versions the smoke test passed on.
 
 ## Status
 
-- Tested: preprocessing on synthetic images; patient split (no overlap); metric functions.
-- **Not yet run:** `model.py` and `train.py` were written in an environment without PyTorch.
-  First tasks: install deps (`torch torchvision scikit-learn pandas pillow`), run `python model.py`,
-  build a tiny synthetic dataset and smoke-test `train.py` on CPU, then fix anything that breaks.
+- Tested on CPU (torch 2.15, Python 3.13): `python model.py` (11.2M parameters, same count as a standard
+  ResNet-18 with one output); preprocess -> train -> test end to end on synthetic data, including `--enhance`,
+  `--limit`, `--workers 0`, a corrupt image, and a validation set with only one class; patient split
+  (no overlap); metric functions (threshold picking matches brute force, also with float16 ties).
+  The same seed gives identical results run to run on CPU.
+- Smoke test: 3 epochs checks that it runs (~30 s); 20 epochs checks that it learns
+  (val AUC 0.68 -> 0.96 on the synthetic data, ~2 min on 4 CPU cores).
+- Fixed: when a run never saved a checkpoint, `train.py` could test a stale `best.pt` left in `--out`
+  by an earlier run. It now checks whether this run saved one.
+- Not yet run: the GPU path (mixed precision with GradScaler).
 - Real training needs an NVIDIA GPU. If none is available locally, prepare the run for a Kaggle Notebook
   (inputs in `/kaggle/input`, outputs to `/kaggle/working`).
 

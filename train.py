@@ -188,7 +188,12 @@ def main():
     # The test set is touched exactly once, at the very end, using the model and
     # cutoff chosen on validation data. Peeking at it earlier would make the
     # final number look better than reality.
-    if not os.path.exists(f"{args.out}/best.pt"):
+    #
+    # Ask whether THIS run saved a checkpoint (best_auc only moves above -1
+    # when it does). Checking whether best.pt exists is not enough: a file
+    # left over from an earlier run in the same --out folder would be loaded
+    # and tested instead, and that model may have trained on these test eyes.
+    if best_auc < 0:
         print("No checkpoint was saved (validation set needs both classes). Use more data.")
         return
     ckpt = torch.load(f"{args.out}/best.pt", map_location=device)

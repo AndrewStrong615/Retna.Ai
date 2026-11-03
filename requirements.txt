@@ -1,0 +1,12 @@
+# Smoke-tested on CPU (Nov 2026, Python 3.13) with: torch 2.15.0, torchvision 0.29.2,
+# scikit-learn 1.9.1, pandas 3.0.5, Pillow 12.3.0, numpy 2.5.3.
+#
+# On a machine without an NVIDIA GPU, the CPU-only PyTorch build is a much smaller download:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# On Kaggle, do NOT install torch: the preinstalled build is matched to Kaggle's GPU drivers.
+torch>=2.4          # train.py uses torch.amp.GradScaler("cuda", ...)
+torchvision
+scikit-learn
+pandas
+Pillow>=9.1         # preprocess.py uses Image.Resampling.LANCZOS
+numpy

@@ -1,0 +1,31 @@
+# Project rule: never commit dataset images, labels, or checkpoints.
+# (To commit a figure you made yourself, e.g. an ROC plot for a write-up,
+# override this on purpose with: git add -f path/to/figure.png)
+
+# Images: raw, preprocessed, or synthetic
+*.jpeg
+*.jpg
+*.png
+*.tif
+*.tiff
+
+# Datasets and labels
+data/
+synthetic/
+processed*/
+trainLabels*.csv
+*.zip
+*.7z
+
+# Training outputs: checkpoints, histories, split files
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# Python and Jupyter clutter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
