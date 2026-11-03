@@ -27,6 +27,9 @@ Usage (about 30 seconds on a CPU; checks that everything RUNS):
 After 3 epochs the model is still close to random, so ignore the AUC there.
 To check that it LEARNS, run the same train.py command with --epochs 20
 (about 2 minutes on 4 CPU cores): validation AUC should climb past 0.9.
+train.py refuses to reuse a folder that holds results: add --overwrite (or
+pick a new --out) to run it again. For a quick automated check of everything,
+use `python selftest.py` instead.
 """
 
 import argparse
