@@ -89,7 +89,10 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
   drop_intermediate=False (effect at EyePACS scale well under 0.2 points of sens/spec), threshold stored on the
   raw score, per-epoch diagnostics (no-skill loss, train AUC, lr, img/s, share of time waiting for data, mean val
   score per grade), predictions CSVs, test results written right after the single test pass, numpy values
-  converted before saving, refuse-to-overwrite, auto worker count, channels_last + cudnn.benchmark on GPU.
+  converted before saving, refuse-to-overwrite, auto worker count, cudnn.benchmark on GPU.
+- Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
+  with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
+  it is now off by default (`--channels-last 1` to turn it back on).
 - Planned, part 2: offline `analyze.py` on the predictions CSVs (bootstrap CIs, patient-level and per-grade
   numbers, paired run-vs-run comparison on validation, fellow-eye blending on validation), a val-only re-scorer
   so exp2's best.pt can be paired with later runs, preprocess.json. Later experiments: 60 epochs, 512 px, TTA.
