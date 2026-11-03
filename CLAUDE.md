@@ -25,6 +25,8 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
   Its docstring has the smoke-test commands.
 - `requirements.txt`: dependencies, with the versions the smoke test passed on.
+- `kaggle_train.ipynb`: the GPU run on Kaggle: GPU check, clone this repo, find the data, preprocess,
+  2-epoch sanity check, full run, results.
 
 ## Status
 
@@ -37,9 +39,11 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   (val AUC 0.68 -> 0.96 on the synthetic data, ~2 min on 4 CPU cores).
 - Fixed: when a run never saved a checkpoint, `train.py` could test a stale `best.pt` left in `--out`
   by an earlier run. It now checks whether this run saved one.
-- Not yet run: the GPU path (mixed precision with GradScaler).
-- Real training needs an NVIDIA GPU. If none is available locally, prepare the run for a Kaggle Notebook
-  (inputs in `/kaggle/input`, outputs to `/kaggle/working`).
+- Not yet run: the GPU path (mixed precision with GradScaler). The notebook's sanity check is where it first runs.
+- Real training needs an NVIDIA GPU: `kaggle_train.ipynb` runs the pipeline on Kaggle (inputs in `/kaggle/input`,
+  outputs to `/kaggle/working`). Use the GPU T4 x2 accelerator: Kaggle's P100 fails with current PyTorch builds
+  ("no kernel image is available"). Tested end to end on CPU in a simulated Kaggle folder layout;
+  not yet run on Kaggle itself.
 
 ## Working with me
 
