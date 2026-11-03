@@ -32,6 +32,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
   together, to find what limits training speed on a machine (~3-4 min; stop training first).
+- `heatmap.py`: Grad-CAM written from scratch: for a finished run, colors where the model found evidence of
+  disease on validation eyes (missed, false alarms, caught, cleared; refuses test images). Writes
+  `<run>/heatmaps/*.png`. Each map is scaled to its own peak; the label's `peak` compares strength across eyes.
 - `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
   Its docstring has the smoke-test commands.
 - `requirements.txt`: dependencies, with the versions the smoke test passed on.
