@@ -39,11 +39,19 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   (val AUC 0.68 -> 0.96 on the synthetic data, ~2 min on 4 CPU cores).
 - Fixed: when a run never saved a checkpoint, `train.py` could test a stale `best.pt` left in `--out`
   by an earlier run. It now checks whether this run saved one.
-- Not yet run: the GPU path (mixed precision with GradScaler). The notebook's sanity check is where it first runs.
 - Real training needs an NVIDIA GPU: `kaggle_train.ipynb` runs the pipeline on Kaggle (inputs in `/kaggle/input`,
   outputs to `/kaggle/working`). Use the GPU T4 x2 accelerator: Kaggle's P100 fails with current PyTorch builds
-  ("no kernel image is available"). Tested end to end on CPU in a simulated Kaggle folder layout;
-  not yet run on Kaggle itself.
+  ("no kernel image is available"). Works on Kaggle, including the GPU path (mixed precision with GradScaler).
+  Data: Kaggle dataset `berinaniesh/diabetic-retinopathy-detection` (`data/train`, `data/trainLabels.csv`;
+  35,126 photos, all preprocessed without failures). A full run takes ~80 min (~2.4 min/epoch at 384 px on a T4).
+
+## Experiments
+
+Compare runs by best validation AUC; test numbers are recorded, never used to choose.
+
+| Run | Change from baseline | Best val AUC (epoch) | Test AUC / sens / spec | Notes |
+|---|---|---|---|---|
+| exp1 | baseline: 384 px, no enhance, 30 epochs, defaults | 0.669 (28) | 0.638 / 87.0% / 23.3% | Underfitting: train loss 1.113 -> 1.037 (no-skill level ~1.11), train ~= val loss, val AUC still rising when the cosine LR reached zero. |
 
 ## Working with me
 
