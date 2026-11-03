@@ -139,18 +139,27 @@ def test_end_to_end(tmp):
         ckpt = torch.load(os.path.join(out, "best.pt"), map_location="cpu", weights_only=True)
         check(f"[{target}] best.pt reloads with weights_only=True", "loss" in ckpt and ckpt["target"] == target)
 
-        val = pd.read_csv(os.path.join(out, "val_predictions.csv"))
+        val = pd.read_csv(os.path.join(out, "val_predictions.csv"), float_precision="round_trip")
         labels_v = val["level"] >= 2
         history = json.load(open(os.path.join(out, "history.json")))
         best_row = next(r for r in history if r["epoch"] == ckpt["epoch"])
-        _, spec = sens_spec(labels_v, val["score"], ckpt["threshold"])
+        sens_v, spec_v = sens_spec(labels_v, val["score"], ckpt["threshold"])
         check(f"[{target}] saved val predictions reproduce the logged AUC and specificity",
               safe_auc(labels_v, val["score"]) == ckpt["val_auc"] == best_row["val_auc"]
-              and abs(spec - best_row["val_specificity"]) < 1e-12)
+              and abs(spec_v - best_row["val_specificity"]) < 1e-12)
+        check(f"[{target}] the `referred` column matches the stored threshold (val)",
+              (val["referred"] == (val["score"] >= ckpt["threshold"])).all() and sens_v >= 0.9)
 
         results = json.load(open(os.path.join(out, "test_results.json")))
         check(f"[{target}] test_results.json is complete",
               {"auc", "sensitivity", "specificity", "threshold", "best_epoch"} <= set(results))
+        test = pd.read_csv(os.path.join(out, "test_predictions.csv"), float_precision="round_trip")
+        labels_t = test["level"] >= 2
+        sens_t, spec_t = sens_spec(labels_t, test["referred"], True)
+        check(f"[{target}] test predictions reproduce test_results.json",
+              abs(safe_auc(labels_t, test["score"]) - results["auc"]) < 1e-12
+              and (sens_t, spec_t) == (results["sensitivity"], results["specificity"])
+              and sens_spec(labels_t, test["score"], results["threshold"]) == (sens_t, spec_t))
 
         code, log = run(args)
         check(f"[{target}] a second run into the same folder is refused",

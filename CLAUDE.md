@@ -23,8 +23,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `train.py`: training loop (AdamW, warmup + cosine LR, mixed precision), validation AUC and specificity at a
   target sensitivity, best-checkpoint saving, final test evaluation. `--target ordinal` (default) learns the full
   0-4 grade with a cumulative-logit loss; `--target binary` is the original yes/no target with pos_weight.
-  `--target binary --rotate-interp nearest --rotate-fill black` reproduces the exp2 recipe exactly (checked
-  bit-for-bit against commit 284aabb on CPU). Each run's `--out` folder gets config.json, history.json (per-epoch
+  `--target binary --rotate-interp nearest --rotate-fill black` is the exp2 recipe (checked bit-for-bit against
+  commit 284aabb on CPU with `--workers 0`; with loader workers the augmentation order differs from epoch 2 on,
+  so expect run-to-run noise, not identical numbers). Each run's `--out` folder gets config.json, history.json (per-epoch
   diagnostics), best.pt, val/test_predictions.csv and test_results.json; it refuses a folder that already holds
   results unless `--overwrite`.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
@@ -56,6 +57,11 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
   Stage 4 and auditing, never used to choose a model, a setting or a threshold.
 - Runs with the ordinal target report losses on a different scale; compare runs by AUC (or by "% of no-skill"
   within one target), not by raw loss.
+- Train AUC is measured on augmented images with dropout on, while the weights change, so it normally sits below
+  val AUC; overfitting shows as train AUC clearly above val AUC late in a run.
+- Predictions CSVs: `referred` is the decision the run made; read `score` with
+  `pd.read_csv(path, float_precision="round_trip")` to get it back exactly. For `--target binary` with
+  pos_weight, `prob_referable` is inflated by the class weighting (ranking only, not a real risk).
 
 ## Status
 

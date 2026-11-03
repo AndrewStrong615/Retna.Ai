@@ -10,8 +10,11 @@ Full run (learns from the full 0-4 grade, the default):
 The same run with the old yes/no target, for a fair side-by-side comparison:
   python train.py --labels trainLabels.csv --images processed_384_enhanced --target binary --out runs/exp4
 
-Exactly the exp2 recipe (yes/no target, nearest-neighbor rotation, black corners):
+The exp2 recipe (yes/no target, nearest-neighbor rotation, black corners):
   python train.py ... --target binary --rotate-interp nearest --rotate-fill black
+(With --workers 0 on a CPU this reproduces the old code's numbers bit for bit.
+With loader workers, the random augmentation order differs from epoch 2 on, so
+expect the usual run-to-run noise rather than identical numbers.)
 
 Every run writes into its --out folder: config.json (all settings), history.json
 (one row per epoch), best.pt (the best model), val_predictions.csv,
@@ -212,6 +215,10 @@ class BinaryLoss(nn.Module):
         return self.per_sample(score, grade).mean()
 
     def prob_referable(self, score):
+        # With pos_weight="balanced" this is NOT a calibrated probability: the
+        # weighting trains the model as if half of all eyes were sick, so the
+        # number comes out much higher than the real risk. It still ranks eyes
+        # correctly, which is all AUC and the cutoff need.
         return torch.sigmoid(score)
 
 
@@ -258,14 +265,30 @@ def nonfinite_tensors(model):
     return [n for n, t in named if t.is_floating_point() and not torch.isfinite(t).all()]
 
 
-def save_predictions(path, df, scores, loss_fn, device):
-    """One row per eye: who it is, its true grade, the raw score and P(referable)."""
+def save_predictions(path, df, scores, threshold, loss_fn, device):
+    """
+    One row per eye: who it is, its true grade, the raw score, P(referable), and
+    `referred`, the decision this run actually made (score >= threshold).
+
+    `referred` is saved so nobody has to re-apply the threshold to numbers read
+    back from text: a score written to CSV and read back can differ in the last
+    digit, and the eye sitting exactly at the cutoff could then flip. The score
+    is written as a float64; read it with pd.read_csv(path, float_precision="round_trip")
+    to get it back exactly.
+
+    Never let a file problem kill a long run: on Windows, a CSV that is open in
+    Excel is locked, and writing to it fails.
+    """
     with torch.no_grad():
         probs = loss_fn.prob_referable(torch.as_tensor(scores, device=device)).cpu().numpy()
     out = df[["image", "patient", "level"]].copy()
-    out["score"] = scores
+    out["score"] = np.asarray(scores, dtype=np.float64)
     out["prob_referable"] = probs
-    out.to_csv(path, index=False)
+    out["referred"] = np.asarray(scores) >= threshold
+    try:
+        out.to_csv(path, index=False)
+    except OSError as e:
+        print(f"WARNING: could not write {path} ({e}). Is it open in another program?")
 
 
 # ---------------------------------------------------------------- main
@@ -367,7 +390,7 @@ def main():
     eval_workers = max(1, workers // 2) if workers else 0
     train_loader = loader(train_df, train_tf, workers, shuffle=True, keep_workers=True)
     val_loader = loader(val_df, eval_tf, eval_workers, keep_workers=True)
-    test_loader = loader(test_df, eval_tf, eval_workers)
+    # (the test loader is only created at the very end, for the single test pass)
 
     # ---------------- Model, loss, optimizer ----------------
     model = RetinaResNet().to(device, memory_format=memory_format)
@@ -413,7 +436,8 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     # ---------------- Training loop ----------------
-    best_auc, history = -1.0, []
+    best_auc, history, blew_up = -1.0, [], False
+    best_val_scores, best_thr = None, None
     for epoch in range(1, args.epochs + 1):
         model.train()
         t0 = time.time()
@@ -454,11 +478,15 @@ def main():
             bad = nonfinite_tensors(model)
             print(f"epoch {epoch}: validation scores are NaN/inf, training has blown up. "
                   f"Broken tensors: {bad[:5] or 'none (only some activations overflowed)'}. "
-                  "Try a lower --lr. Stopping; the best checkpoint so far is still tested.")
+                  "Try a lower --lr. Stopping; if a checkpoint was saved, it is still tested.")
+            blew_up = True
             break
         val_labels = val_grades >= REFERABLE_FROM
         val_auc = safe_auc(val_labels, val_scores)
 
+        # Train AUC is measured on the fly: augmented images, dropout on, weights
+        # still changing during the epoch. So it normally sits BELOW val AUC.
+        # Overfitting shows up as train AUC clearly above val AUC late in training.
         ts, tg = torch.cat(train_scores).numpy(), torch.cat(train_grades_seen).numpy()
         finite = np.isfinite(ts)
         train_loss = running / max(seen, 1)
@@ -477,10 +505,12 @@ def main():
             row["val_specificity"] = spec
             msg += f" | specificity at {sens:.0%} sensitivity: {spec:.1%}"
         print(msg + f" | {row['minutes']:.1f} min")
-        grade_means = " ".join(f"{v:+.2f}" for v in row["val_mean_score_by_grade"].values())
+        # Mean raw score per grade: once the model is learning lesions, these
+        # climb from grade 0 to grade 4 (only their order matters, not the values).
+        grade_means = " ".join(f"g{k} {v:+.2f}" for k, v in row["val_mean_score_by_grade"].items())
         print(f"          train AUC {row['train_auc']:.3f} | lr {row['lr']:.1e} | "
               f"{row['train_img_per_s']:.0f} img/s, waiting for data {row['data_wait']:.0%} | "
-              f"mean val score per grade: {grade_means}")
+              f"mean val score: {grade_means}")
         if epoch == 1:
             print(f"          (about {row['minutes'] * args.epochs:.0f} min for all "
                   f"{args.epochs} epochs at this speed)")
@@ -494,8 +524,9 @@ def main():
                                  "background": background, "threshold": thr,
                                  "epoch": epoch, "val_auc": val_auc})},
                        f"{args.out}/best.pt")
-            # The exact validation scores this epoch's cutoff was picked on.
-            save_predictions(f"{args.out}/val_predictions.csv", val_df, val_scores, loss_fn, device)
+            # Keep the exact validation scores this epoch's cutoff was picked
+            # on; they are written to val_predictions.csv after training.
+            best_val_scores, best_thr = val_scores.copy(), thr
             print("    new best, checkpoint saved")
         write_json(f"{args.out}/history.json", history)
 
@@ -509,8 +540,18 @@ def main():
     # left over from an earlier run in the same --out folder would be loaded
     # and tested instead, and that model may have trained on these test eyes.
     if best_auc < 0:
-        print("No checkpoint was saved (validation set needs both classes). Use more data.")
+        if blew_up:
+            print("Training blew up before any checkpoint was saved. Try a lower --lr.")
+        else:
+            print("No checkpoint was saved (validation set needs both classes). Use more data.")
         return
+    save_predictions(f"{args.out}/val_predictions.csv", val_df, best_val_scores, best_thr,
+                     loss_fn, device)
+
+    # Stop the training and validation helper processes before testing, so
+    # their memory is free; the test loader starts its own (fewer) helpers.
+    del train_loader, val_loader
+    test_loader = loader(test_df, eval_tf, eval_workers)
     ckpt = torch.load(f"{args.out}/best.pt", map_location=device)
     model.load_state_dict(ckpt["model"])
     loss_fn.load_state_dict(ckpt["loss"])
@@ -523,12 +564,13 @@ def main():
     # re-running to get them back would mean looking at the test set twice.
     # Any further analysis (confidence intervals, per-grade, per-patient) can be
     # done later from test_predictions.csv, without the model or the images.
-    save_predictions(f"{args.out}/test_predictions.csv", test_df, test_scores, loss_fn, device)
     write_json(f"{args.out}/test_results.json",
                {"auc": test_auc, "sensitivity": sens, "specificity": spec,
                 "threshold": ckpt["threshold"], "best_epoch": ckpt["epoch"],
                 "best_val_auc": ckpt["val_auc"], "target": args.target,
                 "sanity_run": bool(args.limit)})
+    save_predictions(f"{args.out}/test_predictions.csv", test_df, test_scores,
+                     ckpt["threshold"], loss_fn, device)
     if args.limit:
         print("\nSANITY RUN (--limit): a quick check that everything works, NOT a result.")
     print(f"\nTEST (best epoch {ckpt['epoch']}): AUC {test_auc:.4f} | "
