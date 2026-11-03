@@ -69,19 +69,45 @@ def compute_mean_std(df, image_dir, n=1000, seed=0):
     return mean.tolist(), std.tolist()
 
 
-def make_transforms(size, mean, std):
+def estimate_background(df, image_dir, n=50, seed=0):
+    """
+    The color outside the eye: black after plain preprocessing, gray (128)
+    after --enhance. Rotation augmentation uncovers new corners, and they must
+    be filled with this same color, or training photos would get corners that
+    validation and test photos never have.
+
+    We read it from the four corners of a few training images. JPEG
+    compression makes each pixel slightly off, so we take the median.
+    """
+    rows = df.sample(min(n, len(df)), random_state=seed)
+    corners = []
+    for name in rows["image"]:
+        a = np.asarray(Image.open(f"{image_dir}/{name}.jpg").convert("RGB"))
+        corners += [a[0, 0], a[0, -1], a[-1, 0], a[-1, -1]]
+    return tuple(int(v) for v in np.median(corners, axis=0).round())
+
+
+def make_transforms(size, mean, std, background=(0, 0, 0), rotate_interp="bilinear"):
     """
     Augmentation: show the model slightly different versions of each image
     every epoch, so it learns what disease looks like instead of memorizing
     individual photos. Each change here is one that real photos vary by:
     eyes get photographed at different angles, flipped (left vs. right eye),
     and with different brightness and contrast.
+
+    rotate_interp="nearest" and background=(0, 0, 0) reproduce exp1/exp2.
     """
+    interp = {"bilinear": transforms.InterpolationMode.BILINEAR,
+              "nearest": transforms.InterpolationMode.NEAREST}[rotate_interp]
     train_tf = transforms.Compose([
         transforms.RandomResizedCrop(size, scale=(0.85, 1.0), ratio=(0.95, 1.05)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(180),
+        # Bilinear: each new pixel blends its 4 nearest neighbors. Nearest just
+        # copies one, which gives tiny lesions jagged edges (but is ~1/3 faster
+        # on the CPU, so it stays available as a speed fallback).
+        # fill: color for the corners the rotation uncovers (see estimate_background).
+        transforms.RandomRotation(180, interpolation=interp, fill=background),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
@@ -95,9 +121,15 @@ def make_transforms(size, mean, std):
 
 
 class FundusDataset(Dataset):
+    """
+    Returns (image, grade). The grade is the full 0-4 level, not the yes/no
+    label: the loss function decides what to learn from it (only "grade >= 2"
+    for --target binary, every grade boundary for --target ordinal).
+    """
+
     def __init__(self, df, image_dir, transform):
         self.names = df["image"].tolist()
-        self.labels = df["label"].tolist()
+        self.grades = df["level"].tolist()
         self.image_dir = image_dir
         self.transform = transform
 
@@ -106,4 +138,4 @@ class FundusDataset(Dataset):
 
     def __getitem__(self, i):
         img = Image.open(f"{self.image_dir}/{self.names[i]}.jpg").convert("RGB")
-        return self.transform(img), torch.tensor(self.labels[i], dtype=torch.float32)
+        return self.transform(img), torch.tensor(self.grades[i], dtype=torch.long)
