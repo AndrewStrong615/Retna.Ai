@@ -316,8 +316,11 @@ def main():
                    help="rotation augmentation resampling (exp1/exp2 used nearest)")
     p.add_argument("--rotate-fill", choices=["background", "black"], default="background",
                    help="color of the corners rotation uncovers (exp1/exp2 used black)")
-    p.add_argument("--channels-last", type=int, choices=[0, 1], default=1,
-                   help="GPU only: memory layout that is often faster for convolutions")
+    # Measured with bench.py on the RTX 5060 laptop (PyTorch 2.15): channels_last made
+    # training 3x SLOWER (95 vs 301 img/s), so it is off by default. It can be faster
+    # on other GPUs; bench.py tells you which is better on a given machine.
+    p.add_argument("--channels-last", type=int, choices=[0, 1], default=0,
+                   help="GPU only: alternative memory layout (slower on the RTX 5060; see bench.py)")
     p.add_argument("--cudnn-benchmark", type=int, choices=[0, 1], default=1,
                    help="GPU only: let cuDNN time its algorithms once and keep the fastest")
     p.add_argument("--limit", type=int, default=0, help="use only about N images, for quick tests")

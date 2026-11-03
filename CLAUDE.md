@@ -30,6 +30,11 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   results unless `--overwrite`.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
+- `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
+  together, to find what limits training speed on a machine (~3-4 min; stop training first).
+- `heatmap.py`: Grad-CAM written from scratch: for a finished run, colors where the model found evidence of
+  disease on validation eyes (missed, false alarms, caught, cleared; refuses test images). Writes
+  `<run>/heatmaps/*.png`. Each map is scaled to its own peak; the label's `peak` compares strength across eyes.
 - `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
   Its docstring has the smoke-test commands.
 - `requirements.txt`: dependencies, with the versions the smoke test passed on.
@@ -87,7 +92,10 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
   drop_intermediate=False (effect at EyePACS scale well under 0.2 points of sens/spec), threshold stored on the
   raw score, per-epoch diagnostics (no-skill loss, train AUC, lr, img/s, share of time waiting for data, mean val
   score per grade), predictions CSVs, test results written right after the single test pass, numpy values
-  converted before saving, refuse-to-overwrite, auto worker count, channels_last + cudnn.benchmark on GPU.
+  converted before saving, refuse-to-overwrite, auto worker count, cudnn.benchmark on GPU.
+- Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
+  with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
+  it is now off by default (`--channels-last 1` to turn it back on).
 - Planned, part 2: offline `analyze.py` on the predictions CSVs (bootstrap CIs, patient-level and per-grade
   numbers, paired run-vs-run comparison on validation, fellow-eye blending on validation), a val-only re-scorer
   so exp2's best.pt can be paired with later runs, preprocess.json. Later experiments: 60 epochs, 512 px, TTA.
@@ -100,11 +108,14 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 |---|---|---|---|---|
 | exp1 | baseline: 384 px, no enhance, 30 epochs, defaults | 0.669 (28) | 0.638 / 87.0% / 23.3% | Underfitting: train loss 1.113 -> 1.037 (no-skill level ~1.11), train ~= val loss, val AUC still rising when the cosine LR reached zero. |
 | exp2 | `--enhance` preprocessing (else = exp1) | 0.844 (26) | 0.829 / 88.8% / 48.8% | Starts learning lesions at epoch 3; train loss 1.112 -> 0.768, train ~= val loss (no overfitting); val AUC plateaus ~0.84 from epoch 21 as the LR decays. +0.175 val AUC: enhance is now the baseline. |
+| exp3 | revamp defaults: `--target ordinal`, bilinear rotation with background fill (laptop, RTX 5060) | 0.844 (30) | 0.827 / 88.0% / 48.5% | Learning starts at epoch 2-3; train loss 0.338 -> 0.242 (no-skill 0.3385). Train AUC = val AUC at the end (0.847 vs 0.844): no overfitting. Still creeping up at epoch 30 as the LR reaches zero. ~2.2 min/epoch. |
+| exp4 | as exp3 but `--target binary` (paired with exp3: same split, same everything else) | 0.846 (30) | 0.824 / 87.3% / 50.6% | Same curve shape as exp3. vs exp3: +0.002 val AUC = a tie (noise ~0.02). vs exp2: +0.002 = a tie, so the rotation fix made no measurable difference either. |
 
-Next: exp3 = new defaults (ordinal target, bilinear rotation with background fill) and exp4 = the same with
-`--target binary`, back to back on the same split. exp3 vs exp4 is the real test of the ordinal target (it also
-drops pos_weight, so call it "ordinal package vs binary"); exp3 vs exp2 is unpaired and changes two things.
-Differences under ~0.02-0.025 val AUC are within run-to-run noise until a same-settings seed repeat measures it.
+Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
+the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
+synthetic advantage did not carry over); it stays the default because it is a tie and also gives a severity score
+and a real P(referable). The limit is the setup itself (384 px, 30 epochs, ResNet-18), not the target.
+Next: exp5 = 512 px (one change, ordinal target, 30 epochs); then 60 epochs on the better resolution.
 
 ## Working with me
 
