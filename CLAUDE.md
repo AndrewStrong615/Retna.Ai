@@ -115,7 +115,11 @@ Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 ep
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
 synthetic advantage did not carry over); it stays the default because it is a tie and also gives a severity score
 and a real P(referable). The limit is the setup itself (384 px, 30 epochs, ResNet-18), not the target.
-Next: exp5 = 512 px (one change, ordinal target, 30 epochs); then 60 epochs on the better resolution.
+| exp5 | as exp3 but 512 px (`processed_512_enhanced`, `--size 512`) | 0.852 (27) | 0.828 / 88.0% / 47.9% | +0.008 val AUC over exp3 (same recipe at 384 px): small, under the ~0.02 noise, so "maybe slightly better", not proven. Same shape: plateau from epoch ~21 (0.848-0.852), train AUC = val AUC (0.847 vs 0.851). Epochs barely slower than at 384 px (~2.35 vs ~2.2 min), so 512 px stays. |
+
+Reading exp5: resolution did not break the ~0.85 ceiling either. In every run since exp2, train AUC = val AUC at
+the end and the curve flattens as the LR decays, so the model is not fitting even the training images better: it is
+under-trained or too small, not overfitting. Next: exp6 = 512 px, 60 epochs (one change).
 
 ## Working with me
 
