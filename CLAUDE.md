@@ -52,6 +52,7 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | Run | Change from baseline | Best val AUC (epoch) | Test AUC / sens / spec | Notes |
 |---|---|---|---|---|
 | exp1 | baseline: 384 px, no enhance, 30 epochs, defaults | 0.669 (28) | 0.638 / 87.0% / 23.3% | Underfitting: train loss 1.113 -> 1.037 (no-skill level ~1.11), train ~= val loss, val AUC still rising when the cosine LR reached zero. |
+| exp2 | `--enhance` preprocessing (else = exp1) | 0.844 (26) | 0.829 / 88.8% / 48.8% | Starts learning lesions at epoch 3; train loss 1.112 -> 0.768, train ~= val loss (no overfitting); val AUC plateaus ~0.84 from epoch 21 as the LR decays. +0.175 val AUC: enhance is now the baseline. |
 
 ## Working with me
 
