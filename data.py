@@ -69,7 +69,25 @@ def compute_mean_std(df, image_dir, n=1000, seed=0):
     return mean.tolist(), std.tolist()
 
 
-def make_transforms(size, mean, std):
+def estimate_background(df, image_dir, n=50, seed=0):
+    """
+    The color outside the eye: black after plain preprocessing, gray (128)
+    after --enhance. Rotation augmentation uncovers new corners, and they must
+    be filled with this same color, or training photos would get corners that
+    validation and test photos never have.
+
+    We read it from the four corners of a few training images. JPEG
+    compression makes each pixel slightly off, so we take the median.
+    """
+    rows = df.sample(min(n, len(df)), random_state=seed)
+    corners = []
+    for name in rows["image"]:
+        a = np.asarray(Image.open(f"{image_dir}/{name}.jpg").convert("RGB"))
+        corners += [a[0, 0], a[0, -1], a[-1, 0], a[-1, -1]]
+    return tuple(int(v) for v in np.median(corners, axis=0).round())
+
+
+def make_transforms(size, mean, std, background=(0, 0, 0)):
     """
     Augmentation: show the model slightly different versions of each image
     every epoch, so it learns what disease looks like instead of memorizing
@@ -81,7 +99,11 @@ def make_transforms(size, mean, std):
         transforms.RandomResizedCrop(size, scale=(0.85, 1.0), ratio=(0.95, 1.05)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(180),
+        # Bilinear: each new pixel blends its 4 nearest neighbors. The default
+        # (nearest) just copies one, which gives tiny lesions jagged edges.
+        # fill: color for the corners the rotation uncovers (see estimate_background).
+        transforms.RandomRotation(180, interpolation=transforms.InterpolationMode.BILINEAR,
+                                  fill=background),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),

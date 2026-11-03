@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import os
+import subprocess
 import time
 
 import numpy as np
@@ -20,9 +21,19 @@ import torch.nn as nn
 from sklearn.metrics import roc_auc_score, roc_curve
 from torch.utils.data import DataLoader
 
-from data import (FundusDataset, compute_mean_std, load_labels,
+from data import (FundusDataset, compute_mean_std, estimate_background, load_labels,
                   make_transforms, split_by_patient)
 from model import RetinaResNet
+
+
+def code_version():
+    """The git commit of this code, e.g. "284aabb", or None outside a git checkout."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                             text=True, cwd=os.path.dirname(os.path.abspath(__file__)))
+        return out.stdout.strip() or None
+    except OSError:                               # git not installed
+        return None
 
 
 def safe_auc(labels, probs):
@@ -103,7 +114,18 @@ def main():
         print(f"{name:5s}: {len(part):6d} images, {part['label'].mean():.1%} referable")
 
     mean, std = compute_mean_std(train_df, args.images)
-    train_tf, eval_tf = make_transforms(args.size, mean, std)
+    background = estimate_background(train_df, args.images)
+    print(f"Background color outside the eye: {background}")
+    train_tf, eval_tf = make_transforms(args.size, mean, std, background)
+
+    # Save every setting of this run next to its results, so that months from
+    # now you can still tell exactly what each run did. The --images folder
+    # name records the preprocessing too (e.g. "processed_384_enhanced").
+    config = dict(vars(args), code_version=code_version(), torch=torch.__version__,
+                  device=str(device), mean=mean, std=std, background=background,
+                  n_images={"train": len(train_df), "val": len(val_df), "test": len(test_df)})
+    with open(f"{args.out}/config.json", "w") as f:
+        json.dump(config, f, indent=2)
     kw = dict(batch_size=args.batch, num_workers=args.workers, pin_memory=use_amp)
     train_loader = DataLoader(FundusDataset(train_df, args.images, train_tf),
                               shuffle=True, drop_last=len(train_df) > args.batch, **kw)
