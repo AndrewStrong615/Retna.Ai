@@ -106,10 +106,14 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp1 | baseline: 384 px, no enhance, 30 epochs, defaults | 0.669 (28) | 0.638 / 87.0% / 23.3% | Underfitting: train loss 1.113 -> 1.037 (no-skill level ~1.11), train ~= val loss, val AUC still rising when the cosine LR reached zero. |
 | exp2 | `--enhance` preprocessing (else = exp1) | 0.844 (26) | 0.829 / 88.8% / 48.8% | Starts learning lesions at epoch 3; train loss 1.112 -> 0.768, train ~= val loss (no overfitting); val AUC plateaus ~0.84 from epoch 21 as the LR decays. +0.175 val AUC: enhance is now the baseline. |
 
-Next: exp3 = new defaults (ordinal target, bilinear rotation with background fill) and exp4 = the same with
-`--target binary`, back to back on the same split. exp3 vs exp4 is the real test of the ordinal target (it also
-drops pos_weight, so call it "ordinal package vs binary"); exp3 vs exp2 is unpaired and changes two things.
-Differences under ~0.02-0.025 val AUC are within run-to-run noise until a same-settings seed repeat measures it.
+| exp3 | revamp defaults: `--target ordinal`, bilinear rotation with background fill (laptop, RTX 5060) | 0.844 (30) | 0.827 / 88.0% / 48.5% | Learning starts at epoch 2-3; train loss 0.338 -> 0.242 (no-skill 0.3385). Train AUC = val AUC at the end (0.847 vs 0.844): no overfitting. Still creeping up at epoch 30 as the LR reaches zero. ~2.2 min/epoch. |
+| exp4 | as exp3 but `--target binary` (paired with exp3: same split, same everything else) | 0.846 (30) | 0.824 / 87.3% / 50.6% | Same curve shape as exp3. vs exp3: +0.002 val AUC = a tie (noise ~0.02). vs exp2: +0.002 = a tie, so the rotation fix made no measurable difference either. |
+
+Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
+the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
+synthetic advantage did not carry over); it stays the default because it is a tie and also gives a severity score
+and a real P(referable). The limit is the setup itself (384 px, 30 epochs, ResNet-18), not the target.
+Next: exp5 = 512 px (one change, ordinal target, 30 epochs); then 60 epochs on the better resolution.
 
 ## Working with me
 
