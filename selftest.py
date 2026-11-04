@@ -15,6 +15,9 @@ What it checks:
      make data -> preprocess -> train 2 epochs -> test. All output files exist,
      best.pt reloads safely, the saved validation predictions reproduce the logged
      AUC and specificity exactly, and a second run into the same folder is refused.
+  6. The switches: preprocess --tight-mask (gray outside the eye, preprocess.json
+     written), and a run with --pool gem --depth 34 whose saved architecture
+     heatmap.py can rebuild.
 
 It prints PASS or FAIL for each check and exits with an error if anything failed.
 """
@@ -28,6 +31,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 import torch
+from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -164,6 +168,29 @@ def test_end_to_end(tmp):
         code, log = run(args)
         check(f"[{target}] a second run into the same folder is refused",
               code != 0 and "already holds results" in log)
+
+    # 6. The switches.
+    tight = os.path.join(data, "processed_96_tight")
+    code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,
+                     "--size", "96", "--enhance", "--tight-mask", "--workers", "2"])
+    info = json.load(open(os.path.join(tight, "preprocess.json"))) if code == 0 else {}
+    sample = sorted(f for f in os.listdir(tight) if f.endswith(".jpg"))[0] if code == 0 else None
+    corner = np.asarray(Image.open(os.path.join(tight, sample)).convert("RGB"))[0, 0] if sample else [0]
+    check("preprocess --tight-mask: gray outside the eye, preprocess.json written",
+          code == 0 and info.get("tight_mask") is True and all(abs(int(c) - 128) <= 6 for c in corner))
+    out = os.path.join(tmp, "run_gem34")
+    code, log = run(["train.py", "--labels", labels, "--images", tight, "--size", "96", "--epochs", "2",
+                     "--batch", "8", "--workers", "0", "--pool", "gem", "--depth", "34", "--out", out])
+    if code != 0:
+        print(log[-3000:])
+    arch = torch.load(os.path.join(out, "best.pt"), map_location="cpu", weights_only=True).get("arch") \
+        if code == 0 else None
+    check("train --pool gem --depth 34 runs and saves its architecture",
+          arch == {"depth": 34, "pool": "gem", "dropout": 0.2})
+    if code == 0:
+        code, log = run(["heatmap.py", "--run", out, "--images", tight, "--per-group", "1"])
+        pngs = os.listdir(os.path.join(out, "heatmaps")) if code == 0 else []
+        check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
 
 
 def main():

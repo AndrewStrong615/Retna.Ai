@@ -27,7 +27,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from data import FundusDataset, make_transforms
-from model import RetinaResNet
+from model import build_model
 from train import CumulativeLogitLoss
 
 
@@ -48,7 +48,7 @@ def timed_steps(n_steps, step_fn, warmup=5, sync=None):
 def make_train_step(device, use_amp, channels_last, batch, size):
     """One training step exactly like train.py's: AMP, GradScaler, clipping, AdamW."""
     fmt = torch.channels_last if channels_last else torch.contiguous_format
-    model = RetinaResNet().to(device, memory_format=fmt).train()
+    model = build_model().to(device, memory_format=fmt).train()
     loss_fn = CumulativeLogitLoss([0] * 70 + [1] * 8 + [2] * 15 + [3] * 4 + [4] * 3).to(device)
     params = list(model.parameters()) + list(loss_fn.parameters())
     opt = torch.optim.AdamW(params, lr=1e-4)

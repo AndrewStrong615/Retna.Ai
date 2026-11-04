@@ -45,7 +45,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
 from data import make_transforms
-from model import RetinaResNet
+from model import build_model
 
 REFERABLE_FROM = 2
 
@@ -137,7 +137,9 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(os.path.join(args.run, "best.pt"), map_location=device)
-    model = RetinaResNet().to(device)
+    arch = ckpt.get("arch", {})                   # older runs: the default ResNet-18 with avg pooling
+    model = build_model(depth=arch.get("depth", 18), pool=arch.get("pool", "avg"),
+                        dropout=arch.get("dropout", 0.2)).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()                                  # dropout off, BatchNorm uses its saved statistics
     cam = GradCAM(model)
