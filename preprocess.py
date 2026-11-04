@@ -16,9 +16,19 @@ For each image we:
 Usage:
   python preprocess.py --src path/to/raw_images --dst path/to/processed --size 384
   python preprocess.py --src ... --dst ... --size 384 --enhance
+  python preprocess.py --src ... --dst ... --size 512 --enhance --tight-mask
+
+--tight-mask (new, off by default so earlier folders stay reproducible): instead
+of assuming the eye is a perfect circle, find each photo's real eye outline,
+trim a thin band at its edge, and make everything outside it background. With
+--enhance it also blurs only the eye itself, so the dark area outside can't leak
+in and create the bright rim that heat maps showed the model looking at.
+
+Each output folder also gets preprocess.json with the settings used.
 """
 
 import argparse
+import json
 import os
 from multiprocessing import Pool
 
@@ -46,7 +56,34 @@ def pad_to_square(img):
     return canvas
 
 
-def enhance(img):
+def eye_mask(img, margin, threshold=10):
+    """
+    True inside the eye, False outside, for an already cropped, padded and
+    resized photo.
+
+    1. "Bright enough" pixels (same test as crop_black_border) mark the eye.
+    2. Each row is filled between its first and last bright pixel, so dark
+       spots INSIDE the eye (hemorrhages!) are never mistaken for outside.
+    3. The mask is shrunk by `margin` pixels all round, to drop the ragged,
+       darker rim at the very edge of the photo. Shrinking uses a box blur:
+       after blurring, only pixels whose whole neighborhood was inside stay at 255.
+    """
+    bright = np.asarray(img.convert("L")) > threshold
+    has_eye = bright.any(axis=1)
+    first = bright.argmax(axis=1)
+    last = bright.shape[1] - 1 - bright[:, ::-1].argmax(axis=1)
+    cols = np.arange(bright.shape[1])
+    mask = has_eye[:, None] & (cols[None, :] >= first[:, None]) & (cols[None, :] <= last[:, None])
+    if margin > 0:
+        # Pad with "outside" first, so the edge of the image also counts as outside
+        # (otherwise the eye would not shrink where it touches the image border).
+        padded = np.pad(mask, margin + 1, constant_values=False)
+        blurred = Image.fromarray(padded.astype(np.uint8) * 255).filter(ImageFilter.BoxBlur(margin))
+        mask = (np.asarray(blurred) >= 254)[margin + 1:-(margin + 1), margin + 1:-(margin + 1)]
+    return mask
+
+
+def enhance(img, mask=None):
     """
     Local average color subtraction:  out = 4 * image - 4 * blurred_image + 128
 
@@ -55,28 +92,45 @@ def enhance(img):
     tiny red dots (microaneurysms) and bright spots (exudates), on a neutral
     gray background. We then gray out everything outside the eye circle,
     where the blur creates a bright ring artifact.
+
+    With a `mask` (from --tight-mask), the blur only averages pixels INSIDE the
+    eye: blur(image * mask) / blur(mask). Near the edge, the black outside no
+    longer drags the average down, so no bright ring forms. Everything outside
+    the mask becomes gray.
     """
     size = img.size[0]
-    blurred = img.filter(ImageFilter.GaussianBlur(radius=size / 30))
+    radius = size / 30
     a = np.asarray(img, dtype=np.float32)
-    b = np.asarray(blurred, dtype=np.float32)
+    if mask is None:
+        b = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=radius)), dtype=np.float32)
+        yy, xx = np.mgrid[:size, :size]
+        center = (size - 1) / 2
+        outside = (yy - center) ** 2 + (xx - center) ** 2 > (0.9 * size / 2) ** 2
+    else:
+        inside = Image.fromarray((a * mask[..., None]).astype(np.uint8))
+        weight = Image.fromarray(mask.astype(np.uint8) * 255)
+        num = np.asarray(inside.filter(ImageFilter.GaussianBlur(radius=radius)), dtype=np.float32)
+        den = np.asarray(weight.filter(ImageFilter.GaussianBlur(radius=radius)), dtype=np.float32)
+        b = num / np.maximum(den / 255.0, 1e-3)[..., None]
+        outside = ~mask
     out = np.clip(4 * a - 4 * b + 128, 0, 255)
-
-    yy, xx = np.mgrid[:size, :size]
-    center = (size - 1) / 2
-    outside = (yy - center) ** 2 + (xx - center) ** 2 > (0.9 * size / 2) ** 2
     out[outside] = 128
     return Image.fromarray(out.astype(np.uint8))
 
 
 def process_one(job):
-    src_path, dst_path, size, do_enhance = job
+    src_path, dst_path, size, do_enhance, tight_mask, mask_margin = job
     try:
         img = Image.open(src_path).convert("RGB")
         img = pad_to_square(crop_black_border(img))
         img = img.resize((size, size), Image.Resampling.LANCZOS)
+        mask = eye_mask(img, margin=round(size * mask_margin)) if tight_mask else None
         if do_enhance:
-            img = enhance(img)
+            img = enhance(img, mask)
+        elif mask is not None:                   # plain images: just blacken outside the eye
+            a = np.asarray(img).copy()
+            a[~mask] = 0
+            img = Image.fromarray(a)
         img.save(dst_path, quality=95)
         return None
     except Exception as e:                       # some dataset images are corrupt
@@ -89,6 +143,10 @@ def main():
     p.add_argument("--dst", required=True, help="output folder")
     p.add_argument("--size", type=int, default=384)
     p.add_argument("--enhance", action="store_true", help="apply local average color subtraction")
+    p.add_argument("--tight-mask", action="store_true",
+                   help="use each photo's real eye outline instead of a fixed circle")
+    p.add_argument("--mask-margin", type=float, default=0.02,
+                   help="with --tight-mask: trim this fraction of the image size at the eye's edge")
     p.add_argument("--workers", type=int, default=os.cpu_count())
     args = p.parse_args()
 
@@ -100,7 +158,7 @@ def main():
             stem = os.path.splitext(name)[0]
             jobs.append((os.path.join(args.src, name),
                          os.path.join(args.dst, stem + ".jpg"),
-                         args.size, args.enhance))
+                         args.size, args.enhance, args.tight_mask, args.mask_margin))
 
     print(f"Processing {len(jobs)} images with {args.workers} workers...")
     errors = []
@@ -113,6 +171,12 @@ def main():
     print(f"Finished. {len(errors)} images failed.")
     for e in errors[:20]:
         print("  ", e)
+    # Record how this folder was made; train.py copies it into each run's config.json.
+    with open(os.path.join(args.dst, "preprocess.json"), "w") as f:
+        json.dump({"size": args.size, "enhance": args.enhance, "tight_mask": args.tight_mask,
+                   "mask_margin": args.mask_margin if args.tight_mask else None,
+                   "n_images": len(jobs), "n_failed": len(errors), "failed": errors[:100]},
+                  f, indent=2)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ Run `python model.py` to see how an image's shape changes through the network.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class BasicBlock(nn.Module):
@@ -56,6 +57,31 @@ class BasicBlock(nn.Module):
         return self.relu(out + self.shortcut(x))
 
 
+class GeM(nn.Module):
+    """
+    Generalized-mean pooling: turn each feature map into one number with
+
+        ( average of x^p ) ^ (1/p)
+
+    p = 1 is the plain average; the larger p gets, the more it behaves like the
+    maximum. Why it can matter here: a feature map that found ONE small
+    hemorrhage lights up in a few cells out of 256 (at 512 px), and a plain
+    average dilutes that to almost nothing. A higher p lets the strongest spots
+    count more. p is learned; it starts at 3, a common choice.
+    """
+
+    def __init__(self, p=3.0, eps=1e-6):
+        super().__init__()
+        self.p = nn.Parameter(torch.tensor(float(p)))
+        self.eps = eps
+
+    def forward(self, x):
+        p = self.p.clamp(min=1.0)
+        # In full precision: x**3 of large activations would overflow float16.
+        x = x.float().clamp(min=self.eps).pow(p)
+        return F.adaptive_avg_pool2d(x, 1).pow(1.0 / p)
+
+
 class RetinaResNet(nn.Module):
     """
     stem   -> quickly shrinks the image 4x and detects simple features
@@ -63,12 +89,12 @@ class RetinaResNet(nn.Module):
     stage2 -> 128 feature maps at 1/8 resolution  (vessel patterns, lesions)
     stage3 -> 256 feature maps at 1/16 resolution (clusters of lesions)
     stage4 -> 512 feature maps at 1/32 resolution (whole-eye patterns)
-    pool   -> averages each feature map into one number
+    pool   -> turns each feature map into one number (average, or GeM)
     head   -> combines those 512 numbers into one score (the "logit")
     """
 
     def __init__(self, blocks_per_stage=(2, 2, 2, 2), widths=(64, 128, 256, 512),
-                 num_outputs=1, dropout=0.2):
+                 num_outputs=1, dropout=0.2, pool="avg"):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(3, widths[0], kernel_size=7, stride=2, padding=3, bias=False),
@@ -87,7 +113,7 @@ class RetinaResNet(nn.Module):
             in_ch = out_ch
         self.stages = nn.Sequential(*stages)
 
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.pool = nn.AdaptiveAvgPool2d(1) if pool == "avg" else GeM()
         self.dropout = nn.Dropout(dropout)       # randomly zeroes features during training to fight overfitting
         self.head = nn.Linear(in_ch, num_outputs)
         self._init_weights()
@@ -120,6 +146,17 @@ class RetinaResNet(nn.Module):
         x = self.pool(x).flatten(1)
         x = self.dropout(x)
         return self.head(x).squeeze(1)           # one raw score per image
+
+
+# How many BasicBlocks each stage has: depth 18 = ResNet-18 (the default),
+# depth 34 = ResNet-34 (about twice the computation, about twice the weights).
+DEPTHS = {18: (2, 2, 2, 2), 34: (3, 4, 6, 3)}
+
+
+def build_model(depth=18, pool="avg", dropout=0.2):
+    """The one place that turns settings into a network, so train.py and
+    heatmap.py always build exactly the same architecture."""
+    return RetinaResNet(blocks_per_stage=DEPTHS[depth], dropout=dropout, pool=pool)
 
 
 if __name__ == "__main__":

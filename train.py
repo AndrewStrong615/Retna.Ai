@@ -38,7 +38,7 @@ from torch.utils.data import DataLoader
 
 from data import (FundusDataset, compute_mean_std, estimate_background, load_labels,
                   make_transforms, split_by_patient)
-from model import RetinaResNet
+from model import build_model
 
 REFERABLE_FROM = 2          # grade 2 (moderate) or worse = refer to a specialist
 NUM_GRADES = 5              # EyePACS grades 0..4
@@ -319,6 +319,12 @@ def main():
     # Measured with bench.py on the RTX 5060 laptop (PyTorch 2.15): channels_last made
     # training 3x SLOWER (95 vs 301 img/s), so it is off by default. It can be faster
     # on other GPUs; bench.py tells you which is better on a given machine.
+    p.add_argument("--depth", type=int, choices=[18, 34], default=18,
+                   help="network depth: 18 (ResNet-18, default) or 34 (ResNet-34, ~2x compute)")
+    p.add_argument("--pool", choices=["avg", "gem"], default="avg",
+                   help="how feature maps become numbers: avg (default) or gem (lets small strong spots count more)")
+    p.add_argument("--dropout", type=float, default=0.2,
+                   help="share of features randomly dropped before the head during training")
     p.add_argument("--channels-last", type=int, choices=[0, 1], default=0,
                    help="GPU only: alternative memory layout (slower on the RTX 5060; see bench.py)")
     p.add_argument("--cudnn-benchmark", type=int, choices=[0, 1], default=1,
@@ -396,7 +402,8 @@ def main():
     # (the test loader is only created at the very end, for the single test pass)
 
     # ---------------- Model, loss, optimizer ----------------
-    model = RetinaResNet().to(device, memory_format=memory_format)
+    arch = {"depth": args.depth, "pool": args.pool, "dropout": args.dropout}
+    model = build_model(**arch).to(device, memory_format=memory_format)
     train_grades = train_df["level"].to_numpy()
     if args.target == "ordinal":
         loss_fn = CumulativeLogitLoss(train_grades).to(device)
@@ -406,13 +413,18 @@ def main():
     print(f"Target: {args.target} | loss of a model that knows nothing: {no_skill:.4f}")
 
     commit, dirty = code_version()
+    preprocess_info = None                         # how the --images folder was made, if recorded
+    if os.path.exists(os.path.join(args.images, "preprocess.json")):
+        with open(os.path.join(args.images, "preprocess.json")) as f:
+            preprocess_info = json.load(f)
+            preprocess_info.pop("failed", None)
     config = dict(vars(args), workers_used=workers, code_version=commit, code_dirty=dirty,
                   torch=torch.__version__, device=str(device), mean=mean, std=std,
                   background=background, enhanced_inferred=enhanced, no_skill_loss=no_skill,
                   n_images={k: len(v) for k, v in parts.items()}, missing_images=missing,
                   grade_counts={k: v["level"].value_counts().sort_index().to_dict()
                                 for k, v in parts.items()},
-                  sanity_run=bool(args.limit))
+                  sanity_run=bool(args.limit), preprocess=preprocess_info)
     write_json(f"{args.out}/config.json", config)
 
     # Weight decay gently pulls weights toward zero, which reduces overfitting.
@@ -522,7 +534,7 @@ def main():
         if not math.isnan(val_auc) and val_auc > best_auc:
             best_auc = val_auc
             torch.save({"model": model.state_dict(), "loss": loss_fn.state_dict(),
-                        **to_py({"target": args.target, "pos_weight": args.pos_weight,
+                        **to_py({"target": args.target, "pos_weight": args.pos_weight, "arch": arch,
                                  "mean": mean, "std": std, "size": args.size,
                                  "background": background, "threshold": thr,
                                  "epoch": epoch, "val_auc": val_auc})},

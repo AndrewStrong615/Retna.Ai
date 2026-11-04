@@ -18,7 +18,13 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 ## Files
 
 - `preprocess.py`: crop black border, pad to square, resize, optional local-average-color enhancement. Run once.
+  `--tight-mask` (off by default) uses each photo's real eye outline instead of a fixed circle, trims
+  `--mask-margin` (2% of the size) at the edge, and with `--enhance` blurs only inside the eye, so no bright rim
+  or dark crescents (seen where heat maps drifted on missed eyes). Writes `preprocess.json` into the output folder;
+  train.py copies it into each run's config.json.
 - `model.py`: ResNet-18-style network written from scratch. `python model.py` prints shapes per stage.
+  `build_model(depth, pool, dropout)` builds it: depth 18 (default) or 34 (ResNet-34, 21.3M weights); pool `avg`
+  (default) or `gem` (hand-written generalized-mean pooling with learned p, computed in fp32).
 - `data.py`: label loading, patient-level split, normalization stats, augmentation, Dataset class.
 - `train.py`: training loop (AdamW, warmup + cosine LR, mixed precision), validation AUC and specificity at a
   target sensitivity, best-checkpoint saving, final test evaluation. `--target ordinal` (default) learns the full
@@ -27,7 +33,8 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   commit 284aabb on CPU with `--workers 0`; with loader workers the augmentation order differs from epoch 2 on,
   so expect run-to-run noise, not identical numbers). Each run's `--out` folder gets config.json, history.json (per-epoch
   diagnostics), best.pt, val/test_predictions.csv and test_results.json; it refuses a folder that already holds
-  results unless `--overwrite`.
+  results unless `--overwrite`. Architecture switches (defaults = exp1-exp6 behavior, checked bit-for-bit):
+  `--depth 18|34`, `--pool avg|gem`, `--dropout` (0.2); the architecture is saved in best.pt as `arch`.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -115,7 +122,19 @@ Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 ep
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
 synthetic advantage did not carry over); it stays the default because it is a tie and also gives a severity score
 and a real P(referable). The limit is the setup itself (384 px, 30 epochs, ResNet-18), not the target.
-Next: exp5 = 512 px (one change, ordinal target, 30 epochs); then 60 epochs on the better resolution.
+| exp5 | as exp3 but 512 px (`processed_512_enhanced`, `--size 512`) | 0.852 (27) | 0.828 / 88.0% / 47.9% | +0.008 val AUC over exp3 (same recipe at 384 px): small, under the ~0.02 noise, so "maybe slightly better", not proven. Same shape: plateau from epoch ~21 (0.848-0.852), train AUC = val AUC (0.847 vs 0.851). Epochs barely slower than at 384 px (~2.35 vs ~2.2 min), so 512 px stays. |
+
+Heat maps of exp4 (laptop): confident false alarms sat on bright, lesion-like spots in eyes labeled grade 0
+(possibly other conditions, e.g. laser scars or drusen, or label noise, which caps the reachable AUC); confident
+misses had almost no evidence (peak 0.03), and on 9464_right the model ignored visible dark blots and looked at the
+black area outside the eye, next to the bright enhancement rim. Hence the `--tight-mask` and `--pool gem` switches.
+
+Reading exp5: resolution did not break the ~0.85 ceiling either. In every run since exp2, train AUC = val AUC at
+the end and the curve flattens as the LR decays, so the model is not fitting even the training images better: it is
+under-trained or too small, not overfitting. Next: exp6 = 512 px, 60 epochs (one change), running.
+Queue after exp6, one change each against the best so far: `--tight-mask` preprocessing, `--pool gem`,
+`--depth 34`, lower `--dropout`/`--wd`. GeM learned more slowly than avg pooling on the tiny synthetic set
+(val AUC 0.92 vs 0.97 after 20 epochs), so treat it as an open question, not an expected win.
 
 ## Working with me
 
@@ -126,5 +145,10 @@ and don't swap my hand-written components for library versions without asking.
 
 1. Stage 1: from-scratch CNN for referable DR (this).
 2. Stage 2: self-supervised pretraining (masked autoencoder, written from scratch) on pooled unlabeled retinal images.
-3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT).
+3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
+   general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
+   something I recognize" check, since today's model sees every photo only as a DR score. Next small step on the
+   way: report the predicted DR grade (0-4) from the ordinal model's cutpoints, not only referable yes/no.
 4. Stage 4: external validation (e.g. Messidor-2) and comparison with published benchmarks.
+5. Stage 5 (idea): a public demo page where people upload a photo and get the scores plus heat maps. Clearly an
+   educational demo, not a diagnosis; store nothing; refuse images that are not usable retina photos.
