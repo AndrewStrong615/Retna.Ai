@@ -42,6 +42,10 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `heatmap.py`: Grad-CAM written from scratch: for a finished run, colors where the model found evidence of
   disease on validation eyes (missed, false alarms, caught, cleared; refuses test images). Writes
   `<run>/heatmaps/*.png`. Each map is scaled to its own peak; the label's `peak` compares strength across eyes.
+- `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
+  95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
+  on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
+  validation only; `--split test` is for reporting one run's final numbers, never for choosing.
 - `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
   Its docstring has the smoke-test commands.
 - `requirements.txt`: dependencies, with the versions the smoke test passed on.
@@ -103,9 +107,9 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Planned, part 2: offline `analyze.py` on the predictions CSVs (bootstrap CIs, patient-level and per-grade
-  numbers, paired run-vs-run comparison on validation, fellow-eye blending on validation), a val-only re-scorer
-  so exp2's best.pt can be paired with later runs, preprocess.json. Later experiments: 60 epochs, 512 px, TTA.
+- Part 2: `analyze.py` (done), preprocess.json (done). Still open: fellow-eye blending on validation, a val-only
+  re-scorer so exp2's best.pt can be paired with later runs, TTA. Planned noise check: exp6 repeated with
+  `--seed 43` (same split) to measure run-to-run noise for `analyze.py --noise-floor`.
 
 ## Experiments
 

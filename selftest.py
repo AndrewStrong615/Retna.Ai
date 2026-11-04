@@ -169,6 +169,15 @@ def test_end_to_end(tmp):
         check(f"[{target}] a second run into the same folder is refused",
               code != 0 and "already holds results" in log)
 
+    # analyze.py on the two runs above: a single-run report and a paired comparison.
+    run_o, run_b = os.path.join(tmp, "run_ordinal"), os.path.join(tmp, "run_binary")
+    code1, log1 = run(["analyze.py", run_o, "--n-boot", "50"])
+    code2, log2 = run(["analyze.py", run_o, run_b, "--n-boot", "50"])
+    code3, log3 = run(["analyze.py", run_o, run_b, "--split", "test"])
+    check("analyze.py: report, paired comparison, and refusal to compare on test",
+          code1 == 0 and "Per patient" in log1 and code2 == 0 and "Verdict" in log2
+          and code3 != 0 and "validation only" in log3)
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,
