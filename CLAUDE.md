@@ -42,6 +42,10 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `heatmap.py`: Grad-CAM written from scratch: for a finished run, colors where the model found evidence of
   disease on validation eyes (missed, false alarms, caught, cleared; refuses test images). Writes
   `<run>/heatmaps/*.png`. Each map is scaled to its own peak; the label's `peak` compares strength across eyes.
+- `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
+  95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
+  on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
+  validation only; `--split test` is for reporting one run's final numbers, never for choosing.
 - `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
   Its docstring has the smoke-test commands.
 - `requirements.txt`: dependencies, with the versions the smoke test passed on.
@@ -103,9 +107,9 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Planned, part 2: offline `analyze.py` on the predictions CSVs (bootstrap CIs, patient-level and per-grade
-  numbers, paired run-vs-run comparison on validation, fellow-eye blending on validation), a val-only re-scorer
-  so exp2's best.pt can be paired with later runs, preprocess.json. Later experiments: 60 epochs, 512 px, TTA.
+- Part 2: `analyze.py` (done), preprocess.json (done). Still open: fellow-eye blending on validation, a val-only
+  re-scorer so exp2's best.pt can be paired with later runs, TTA. Planned noise check: exp6 repeated with
+  `--seed 43` (same split) to measure run-to-run noise for `analyze.py --noise-floor`.
 
 ## Experiments
 
@@ -117,12 +121,13 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp2 | `--enhance` preprocessing (else = exp1) | 0.844 (26) | 0.829 / 88.8% / 48.8% | Starts learning lesions at epoch 3; train loss 1.112 -> 0.768, train ~= val loss (no overfitting); val AUC plateaus ~0.84 from epoch 21 as the LR decays. +0.175 val AUC: enhance is now the baseline. |
 | exp3 | revamp defaults: `--target ordinal`, bilinear rotation with background fill (laptop, RTX 5060) | 0.844 (30) | 0.827 / 88.0% / 48.5% | Learning starts at epoch 2-3; train loss 0.338 -> 0.242 (no-skill 0.3385). Train AUC = val AUC at the end (0.847 vs 0.844): no overfitting. Still creeping up at epoch 30 as the LR reaches zero. ~2.2 min/epoch. |
 | exp4 | as exp3 but `--target binary` (paired with exp3: same split, same everything else) | 0.846 (30) | 0.824 / 87.3% / 50.6% | Same curve shape as exp3. vs exp3: +0.002 val AUC = a tie (noise ~0.02). vs exp2: +0.002 = a tie, so the rotation fix made no measurable difference either. |
+| exp5 | as exp3 but 512 px (`processed_512_enhanced`, `--size 512`) | 0.852 (27) | 0.828 / 88.0% / 47.9% | +0.008 val AUC over exp3 (same recipe at 384 px): small, under the ~0.02 noise, so "maybe slightly better", not proven. Same shape: plateau from epoch ~21 (0.848-0.852), train AUC = val AUC (0.847 vs 0.851). Epochs barely slower than at 384 px (~2.35 vs ~2.2 min), so 512 px stays. |
+| exp6 | as exp5 but `--epochs 60` | **0.872** (48) | 0.855 / 87.5% / 57.2% | +0.020 val AUC over exp5, the first change since enhance to beat the ~0.85 ceiling (test AUC and specificity moved the same way). Slow climb until ~epoch 30, then steady gains as the LR decays; plateau from ~47. Train AUC now ahead of val (0.893 vs 0.871): the model starts fitting training eyes better, but val loss keeps falling, so no harmful overfitting. New base recipe: 512 px, 60 epochs (~2.4 h). |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
 synthetic advantage did not carry over); it stays the default because it is a tie and also gives a severity score
 and a real P(referable). The limit is the setup itself (384 px, 30 epochs, ResNet-18), not the target.
-| exp5 | as exp3 but 512 px (`processed_512_enhanced`, `--size 512`) | 0.852 (27) | 0.828 / 88.0% / 47.9% | +0.008 val AUC over exp3 (same recipe at 384 px): small, under the ~0.02 noise, so "maybe slightly better", not proven. Same shape: plateau from epoch ~21 (0.848-0.852), train AUC = val AUC (0.847 vs 0.851). Epochs barely slower than at 384 px (~2.35 vs ~2.2 min), so 512 px stays. |
 
 Heat maps of exp4 (laptop): confident false alarms sat on bright, lesion-like spots in eyes labeled grade 0
 (possibly other conditions, e.g. laser scars or drusen, or label noise, which caps the reachable AUC); confident
@@ -131,8 +136,8 @@ black area outside the eye, next to the bright enhancement rim. Hence the `--tig
 
 Reading exp5: resolution did not break the ~0.85 ceiling either. In every run since exp2, train AUC = val AUC at
 the end and the curve flattens as the LR decays, so the model is not fitting even the training images better: it is
-under-trained or too small, not overfitting. Next: exp6 = 512 px, 60 epochs (one change), running.
-Queue after exp6, one change each against the best so far: `--tight-mask` preprocessing, `--pool gem`,
+under-trained or too small, not overfitting. exp6 (60 epochs) confirmed it: training length was the limit.
+Queue after exp6, one change each against exp6 (512 px, 60 epochs): `--tight-mask` preprocessing, `--pool gem`,
 `--depth 34`, lower `--dropout`/`--wd`. GeM learned more slowly than avg pooling on the tiny synthetic set
 (val AUC 0.92 vs 0.97 after 20 epochs), so treat it as an open question, not an expected win.
 
