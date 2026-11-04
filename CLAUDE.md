@@ -117,12 +117,12 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp2 | `--enhance` preprocessing (else = exp1) | 0.844 (26) | 0.829 / 88.8% / 48.8% | Starts learning lesions at epoch 3; train loss 1.112 -> 0.768, train ~= val loss (no overfitting); val AUC plateaus ~0.84 from epoch 21 as the LR decays. +0.175 val AUC: enhance is now the baseline. |
 | exp3 | revamp defaults: `--target ordinal`, bilinear rotation with background fill (laptop, RTX 5060) | 0.844 (30) | 0.827 / 88.0% / 48.5% | Learning starts at epoch 2-3; train loss 0.338 -> 0.242 (no-skill 0.3385). Train AUC = val AUC at the end (0.847 vs 0.844): no overfitting. Still creeping up at epoch 30 as the LR reaches zero. ~2.2 min/epoch. |
 | exp4 | as exp3 but `--target binary` (paired with exp3: same split, same everything else) | 0.846 (30) | 0.824 / 87.3% / 50.6% | Same curve shape as exp3. vs exp3: +0.002 val AUC = a tie (noise ~0.02). vs exp2: +0.002 = a tie, so the rotation fix made no measurable difference either. |
+| exp5 | as exp3 but 512 px (`processed_512_enhanced`, `--size 512`) | 0.852 (27) | 0.828 / 88.0% / 47.9% | +0.008 val AUC over exp3 (same recipe at 384 px): small, under the ~0.02 noise, so "maybe slightly better", not proven. Same shape: plateau from epoch ~21 (0.848-0.852), train AUC = val AUC (0.847 vs 0.851). Epochs barely slower than at 384 px (~2.35 vs ~2.2 min), so 512 px stays. |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
 synthetic advantage did not carry over); it stays the default because it is a tie and also gives a severity score
 and a real P(referable). The limit is the setup itself (384 px, 30 epochs, ResNet-18), not the target.
-| exp5 | as exp3 but 512 px (`processed_512_enhanced`, `--size 512`) | 0.852 (27) | 0.828 / 88.0% / 47.9% | +0.008 val AUC over exp3 (same recipe at 384 px): small, under the ~0.02 noise, so "maybe slightly better", not proven. Same shape: plateau from epoch ~21 (0.848-0.852), train AUC = val AUC (0.847 vs 0.851). Epochs barely slower than at 384 px (~2.35 vs ~2.2 min), so 512 px stays. |
 
 Heat maps of exp4 (laptop): confident false alarms sat on bright, lesion-like spots in eyes labeled grade 0
 (possibly other conditions, e.g. laser scars or drusen, or label noise, which caps the reachable AUC); confident
