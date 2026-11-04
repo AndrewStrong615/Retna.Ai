@@ -125,6 +125,7 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp6 | as exp5 but `--epochs 60` | **0.872** (48) | 0.855 / 87.5% / 57.2% | +0.020 val AUC over exp5, the first change since enhance to beat the ~0.85 ceiling (test AUC and specificity moved the same way). Slow climb until ~epoch 30, then steady gains as the LR decays; plateau from ~47. Train AUC now ahead of val (0.893 vs 0.871): the model starts fitting training eyes better, but val loss keeps falling, so no harmful overfitting. New base recipe: 512 px, 60 epochs (~2.4 h). |
 | exp7 | as exp6 but images from `preprocess.py --enhance --tight-mask` (`processed_512_enhanced_tight`) | **0.888** (56) | 0.883 / 90.5% / 60.0% | Paired vs exp6 (analyze.py, same 5,268 val eyes): +0.016, 95% range +0.007 to +0.026, better in 100% of resamples, so beyond validation-sampling luck; seed noise not yet measured. Learned faster (0.874 at epoch 30 vs ~0.850 for exp6); plateau from ~45; train AUC 0.904 vs val 0.888, val loss lowest at the end. Some epochs ~2.85 min instead of ~2.35 (laptop heat). New base recipe: 512 px, tight mask, 60 epochs. |
 | exp7b | exp7 repeated with `--seed 43` (noise check: same recipe, same split, different random init/order) | 0.888 | (not recorded) | Paired vs exp7: -0.0001, 95% range -0.007 to +0.006: the recipe reproduces almost exactly. One seed pair is a single sample, so use a cautious working noise floor of ~0.005-0.01 rather than 0.0001. With it, exp7 vs exp6 (+0.016) passes both checks: the tight mask is a confirmed improvement. |
+| exp8 | as exp7 but `--pool gem` | **0.896** (50) | 0.889 / 91.8% / 60.8% | Paired vs exp7: +0.008, 95% range +0.001 to +0.015, better in 99% of resamples; above the 0.007 noise floor, so it passes both checks, narrowly. Learned much faster early (0.737 at epoch 2 vs 0.685; grade means separated by epoch 4); same healthy ending (plateau from ~43, train AUC 0.912 vs val 0.895, val loss lowest at the end). Steady 2.3 min/epoch with fans at max. New base recipe: 512 px, tight mask, 60 epochs, GeM. |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
@@ -141,9 +142,8 @@ the end and the curve flattens as the LR decays, so the model is not fitting eve
 under-trained or too small, not overfitting. exp6 (60 epochs) confirmed it: training length was the limit.
 exp7 (tight mask) beat exp6 in a paired comparison, so the base recipe is now 512 px + `--tight-mask` + 60 epochs. exp7b (seed repeat) matched exp7 within 0.0001, so the old "~0.02 noise" rule of thumb was too cautious: with
 paired comparisons, differences of ~0.01 can be real. Working rule: a change counts if `analyze.py` check 1 passes
-and the gain exceeds `--noise-floor 0.007`. Next, one change each against exp7: `--pool gem`,
-`--depth 34`, lower `--dropout`/`--wd`, more diverse training data (APTOS/DDR in the train split only). GeM learned more slowly than avg pooling on the tiny synthetic set
-(val AUC 0.92 vs 0.97 after 20 epochs), so treat it as an open question, not an expected win.
+and the gain exceeds `--noise-floor 0.007`. exp8 (GeM) passed narrowly and joins the recipe. Next, one change each
+against exp8: `--depth 34`, lower `--dropout`/`--wd`, more diverse training data (APTOS/DDR in the train split only). (On the tiny synthetic set GeM had looked slower than avg pooling; on real photos it was faster and better.)
 
 ## Working with me
 
