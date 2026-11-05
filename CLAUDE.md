@@ -154,6 +154,10 @@ Free tricks on exp8 (analyze.py, validation, paired vs exp8 alone at 0.896 / spe
 - `--ensemble` exp8 + exp9: 0.901 (+0.005, range +0.002 to +0.008), spec 64.8%.
 - `--both-eyes`: 0.917 (+0.021, range +0.016 to +0.026), spec 70.6%; w = 0.45 chosen on a smooth, flat peak
   (0.40-0.50 all ~0.917), so the choice barely matters. The biggest single gain since 60 epochs.
+- `--ensemble --both-eyes` (exp8 + exp9, w = 0.40): **0.920** (+0.024, range +0.019 to +0.030), spec 71.6%.
+DECISION (made on validation, before touching test): the frozen Stage 1 system is the exp8 + exp9 ensemble with
+both-eyes blending (w = 0.40, cutoff for 90% sensitivity, all chosen on validation). Its official test result
+comes from one run of `python analyze.py runs\exp8 runs\exp9 --ensemble --both-eyes --final-test`.
 
 ## Working with me
 
