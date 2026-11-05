@@ -1,7 +1,7 @@
 # Retina-from-scratch
 
 A from-scratch deep learning project to detect eye disease from retinal images.
-**Stage 1 (current):** classify referable diabetic retinopathy (grade >= 2) from
+**Stage 1 (done, see "Stage 1 result"):** classify referable diabetic retinopathy (grade >= 2) from
 color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `image,level`).
 
 ## Hard rules
@@ -159,6 +159,21 @@ DECISION (made on validation, before touching test): the frozen Stage 1 system i
 both-eyes blending (w = 0.40, cutoff for 90% sensitivity, all chosen on validation). Its official test result
 comes from one run of `python analyze.py runs\exp8 runs\exp9 --ensemble --both-eyes --final-test`.
 
+## Stage 1 result (frozen)
+
+System: ensemble of exp8 + exp9 (512 px, tight mask, 60 epochs, GeM, ordinal target; ResNet-18 and ResNet-34),
+each eye's score blended with its fellow eye's (w = 0.40), cutoff for 90% sensitivity; all chosen on validation.
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| | AUC | Sensitivity | Specificity |
+|---|---|---|---|
+| Validation (choices made here) | 0.920 | 90.0% | 71.6% |
+| **Test (official, touched once)** | **0.915** [0.900-0.928] | **89.9%** [87.6-92.0%] | **71.7%** [69.8-73.6%] |
+
+Validation to test dropped only 0.005 AUC and specificity held, so the choices generalize within EyePACS.
+From exp1: test AUC 0.638 -> 0.915; healthy eyes cleared at ~90% sensitivity 23% -> 72%. This is the benchmark
+Stage 2 must beat. Not yet known: performance on other hospitals' photos (Stage 4).
+
 ## Working with me
 
 I'm learning ML through this project. Explain what you change and why, keep code well commented,
@@ -166,7 +181,7 @@ and don't swap my hand-written components for library versions without asking.
 
 ## Roadmap
 
-1. Stage 1: from-scratch CNN for referable DR (this).
+1. Stage 1: from-scratch CNN for referable DR. Done: test AUC 0.915, sens 89.9%, spec 71.7% (see above).
 2. Stage 2: self-supervised pretraining (masked autoencoder, written from scratch) on pooled unlabeled retinal images.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
