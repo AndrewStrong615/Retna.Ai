@@ -200,6 +200,13 @@ fellow eye's (w = 0.40), cutoff for 90% sensitivity, all chosen on validation. I
 validation (0.924 vs 0.920, spec 73.1% vs 71.6%) with one model instead of two. Official test result: one run of
 `python analyze.py runs\exp10 --both-eyes --final-test` (recorded below, not used to choose anything).
 
+TTA on exp10 (`tta.py`, 8 orientations, validation only; plain view reproduced 0.9047 exactly): 0.9115, paired vs
+exp10 +0.0069, 95% range +0.004 to +0.010, better in 100% of resamples (check 1 passed). Check 2 (training luck) does
+not apply: TTA reuses the SAME weights, so no seed noise enters the difference; to confirm the gain is not specific
+to one model, repeat it on exp8/exp9. With `--both-eyes`: **0.929** (w = 0.40), spec 75.1% (vs 0.924 / 73.1%).
+Not test-evaluated: bundle with the 768 px run (exp11) into one next system and one test pass, rather than spending
+a test evaluation on each small trick.
+
 ## Stage 2a result (frozen)
 
 Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
