@@ -46,6 +46,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
   validation only; `--split test` is for reporting one run's final numbers, never for choosing.
+  Free tricks: `--ensemble` (average several runs' standardized scores) and `--both-eyes` (blend each eye's
+  score with the fellow eye's, weight w chosen on validation); `--final-test` applies the validation choices
+  (scales, w, 90%-sensitivity cutoff) to the test set once, for a frozen result.
 - `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
   Its docstring has the smoke-test commands.
 - `requirements.txt`: dependencies, with the versions the smoke test passed on.
@@ -107,7 +110,7 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Part 2: `analyze.py` (done), preprocess.json (done). Still open: fellow-eye blending on validation, a val-only
+- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). Still open: a val-only
   re-scorer so exp2's best.pt can be paired with later runs, TTA. Noise check done (exp7b): seed-to-seed
   difference 0.0001 on one pair; working `--noise-floor 0.007`.
 

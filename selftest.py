@@ -177,6 +177,9 @@ def test_end_to_end(tmp):
     check("analyze.py: report, paired comparison, and refusal to compare on test",
           code1 == 0 and "Per patient" in log1 and code2 == 0 and "Verdict" in log2
           and code3 != 0 and "validation only" in log3)
+    code4, log4 = run(["analyze.py", run_o, run_b, "--ensemble", "--both-eyes", "--final-test", "--n-boot", "50"])
+    check("analyze.py: ensemble + both eyes, chosen on validation, applied to test once",
+          code4 == 0 and "chosen w =" in log4 and "TEST SET, evaluated once" in log4)
 
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
