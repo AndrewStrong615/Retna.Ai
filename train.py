@@ -273,7 +273,7 @@ def save_predictions(path, df, scores, threshold, loss_fn, device):
     `referred` is saved so nobody has to re-apply the threshold to numbers read
     back from text: a score written to CSV and read back can differ in the last
     digit, and the eye sitting exactly at the cutoff could then flip. The score
-    is written as a float64; read it with pd.read_csv(path, float_precision="round_trip")
+    is written as a float64; read it with pd.read_csv(path, converters={"score": float})
     to get it back exactly.
 
     Never let a file problem kill a long run: on Windows, a CSV that is open in

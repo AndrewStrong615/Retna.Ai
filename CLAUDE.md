@@ -79,7 +79,7 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Train AUC is measured on augmented images with dropout on, while the weights change, so it normally sits below
   val AUC; overfitting shows as train AUC clearly above val AUC late in a run.
 - Predictions CSVs: `referred` is the decision the run made; read `score` with
-  `pd.read_csv(path, float_precision="round_trip")` to get it back exactly. For `--target binary` with
+  `pd.read_csv(path, converters={"score": float})` to get it back exactly. For `--target binary` with
   pos_weight, `prob_referable` is inflated by the class weighting (ranking only, not a real risk).
 
 ## Status
@@ -150,6 +150,10 @@ and the gain exceeds `--noise-floor 0.007`. exp8 (GeM) passed narrowly and joins
 against exp8: ~~`--depth 34`~~ (exp9: tie, slower), lower `--dropout`/`--wd`, more diverse training data (APTOS/DDR in the train split only). (On the tiny synthetic set GeM had looked slower than avg pooling; on real photos it was faster and better.)
 Gains so far: +0.020 (60 epochs), +0.016 (tight mask), +0.008 (GeM), 0.000 (ResNet-34): the recipe is close to its
 limit. Freeze candidate: the exp8 recipe (512 px, tight mask, 60 epochs, GeM, ResNet-18, ordinal target).
+Free tricks on exp8 (analyze.py, validation, paired vs exp8 alone at 0.896 / spec 61.8%):
+- `--ensemble` exp8 + exp9: 0.901 (+0.005, range +0.002 to +0.008), spec 64.8%.
+- `--both-eyes`: 0.917 (+0.021, range +0.016 to +0.026), spec 70.6%; w = 0.45 chosen on a smooth, flat peak
+  (0.40-0.50 all ~0.917), so the choice barely matters. The biggest single gain since 60 epochs.
 
 ## Working with me
 

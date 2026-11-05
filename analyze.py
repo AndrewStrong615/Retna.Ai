@@ -54,7 +54,9 @@ def load_predictions(run, split):
     if not os.path.exists(path):
         raise SystemExit(f"{path} not found. Runs made before the revamp (exp1, exp2) have no "
                          "predictions files.")
-    df = pd.read_csv(path, float_precision="round_trip", dtype={"image": str, "patient": str})
+    # converters={"score": float}: Python's float() turns the saved text back into exactly the
+    # same number (pandas' own float_precision option is deprecated in newer versions).
+    df = pd.read_csv(path, dtype={"image": str, "patient": str}, converters={"score": float})
     if "referred" not in df:                       # early files: rebuild the decision
         with open(os.path.join(run, "test_results.json")) as f:
             df["referred"] = df["score"] >= json.load(f)["threshold"]
