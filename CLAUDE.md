@@ -196,7 +196,11 @@ and don't swap my hand-written components for library versions without asking.
    training split's images (labels unused); validation/test patients excluded. Plan: preprocess `data\test` with
    `--enhance --tight-mask` at 512 px, pretrain ~50 epochs (~6-7 min/epoch, ~6 h), fine-tune with the exp8 recipe
    and `--init`, compare paired with exp8 (`analyze.py --noise-floor 0.007`), then with the tricks vs the frozen
-   0.915. Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
+   0.915. pre1 done (laptop, GPU): 50 epochs, 8.0 min/epoch (162 img/s, ~6.7 h); masked-pixel L1 loss
+   0.495 -> 0.401 (epoch 2) -> 0.356 (5) -> 0.339 (10) -> 0.320 (30) -> 0.309 (50), still easing down at the end
+   (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
+   visible (check `nvidia-smi`, power mode, restart); stop at once. Next: fine-tune exp10 with `--init`.
+   Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
    something I recognize" check, since today's model sees every photo only as a DR score. Next small step on the
