@@ -323,6 +323,8 @@ def main():
                    help="network depth: 18 (ResNet-18, default) or 34 (ResNet-34, ~2x compute)")
     p.add_argument("--pool", choices=["avg", "gem"], default="avg",
                    help="how feature maps become numbers: avg (default) or gem (lets small strong spots count more)")
+    p.add_argument("--init", default=None,
+                   help="start from a self-pretrained encoder (pretrain.py's encoder.pt) instead of random weights")
     p.add_argument("--dropout", type=float, default=0.2,
                    help="share of features randomly dropped before the head during training")
     p.add_argument("--channels-last", type=int, choices=[0, 1], default=0,
@@ -403,7 +405,23 @@ def main():
 
     # ---------------- Model, loss, optimizer ----------------
     arch = {"depth": args.depth, "pool": args.pool, "dropout": args.dropout}
-    model = build_model(**arch).to(device, memory_format=memory_format)
+    model = build_model(**arch)
+    init_info = None
+    if args.init:
+        # Stage 2: start from weights this project pretrained itself (pretrain.py), not
+        # from random ones. Only the stem and stages are loaded; the pooling and the
+        # head, which pretraining never used, start fresh as usual.
+        pre = torch.load(args.init, map_location="cpu")
+        if pre["arch"]["depth"] != args.depth or pre["arch"]["pool"] != args.pool:
+            raise SystemExit(f"{args.init} was pretrained with {pre['arch']}; use the same --depth/--pool.")
+        missing, unexpected = model.load_state_dict(pre["encoder"], strict=False)
+        not_loaded = [k for k in missing if not k.startswith(("head.", "pool."))]
+        if not_loaded or unexpected:
+            raise SystemExit(f"Encoder does not fit this network: missing {not_loaded[:5]}, "
+                             f"unexpected {unexpected[:5]}")
+        init_info = {"path": os.path.abspath(args.init), "pretrain_epoch": pre.get("epoch")}
+        print(f"Starting from the pretrained encoder {args.init} (pretraining epoch {pre.get('epoch')})")
+    model = model.to(device, memory_format=memory_format)
     train_grades = train_df["level"].to_numpy()
     if args.target == "ordinal":
         loss_fn = CumulativeLogitLoss(train_grades).to(device)
@@ -424,7 +442,7 @@ def main():
                   n_images={k: len(v) for k, v in parts.items()}, missing_images=missing,
                   grade_counts={k: v["level"].value_counts().sort_index().to_dict()
                                 for k, v in parts.items()},
-                  sanity_run=bool(args.limit), preprocess=preprocess_info)
+                  sanity_run=bool(args.limit), preprocess=preprocess_info, init=init_info)
     write_json(f"{args.out}/config.json", config)
 
     # Weight decay gently pulls weights toward zero, which reduces overfitting.

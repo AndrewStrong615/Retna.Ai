@@ -6,9 +6,11 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 
 ## Hard rules
 
-- **No pretrained weights, ever.** Every model starts from random initialization.
-  No `pretrained=True`, no timm/torchvision/Hugging Face weights, no RETFound,
-  no ImageNet checkpoints. PyTorch building blocks (Conv2d, BatchNorm, etc.) are fine.
+- **No outside pretrained weights, ever.** No `pretrained=True`, no timm/torchvision/Hugging Face weights,
+  no RETFound, no ImageNet checkpoints. PyTorch building blocks (Conv2d, BatchNorm, etc.) are fine.
+  The one exception (Stage 2 on): weights this project pretrained itself, starting from random initialization,
+  on this project's own photos (e.g. `pretrain.py`). Self-supervised pretraining must never use the labeled
+  validation or test patients, so the comparison with Stage 1 stays fair.
 - **Split by patient, not by image.** Images are named `{patient}_{left|right}`.
   Both eyes of a patient must land in the same split (see `split_by_patient` in `data.py`).
 - **The test set is touched once**, at the end of a run. Model selection and the
@@ -35,6 +37,12 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   diagnostics), best.pt, val/test_predictions.csv and test_results.json; it refuses a folder that already holds
   results unless `--overwrite`. Architecture switches (defaults = exp1-exp6 behavior, checked bit-for-bit):
   `--depth 18|34`, `--pool avg|gem`, `--dropout` (0.2); the architecture is saved in best.pt as `arch`.
+- `pretrain.py` (Stage 2): SimMIM-style masked image modeling, written from scratch, for the SAME network as
+  Stage 1: hide 60% of the image in 32x32 squares (learned mask color), the ResNet stem+stages encode, a 1x1 conv
+  + PixelShuffle redraws the pixels, L1 loss on hidden pixels only. Leaves out every image of the labeled
+  validation/test patients (`--exclude-labels`, same `--split-seed` as train.py). Saves `encoder.pt` and
+  `last.pt` every epoch (`--resume`), reconstruction pictures every `--example-every` epochs. `train.py --init
+  <encoder.pt>` starts disease training from it (same `--depth`/`--pool` required; recorded in config.json).
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -183,6 +191,16 @@ and don't swap my hand-written components for library versions without asking.
 
 1. Stage 1: from-scratch CNN for referable DR. Done: test AUC 0.915, sens 89.9%, spec 71.7% (see above).
 2. Stage 2: self-supervised pretraining (masked autoencoder, written from scratch) on pooled unlabeled retinal images.
+   Stage 2a (chosen): SimMIM-style masked image modeling with the Stage 1 ResNet-18 + GeM (`pretrain.py`), so the
+   only difference from exp8 is the starting weights. Pool: the unused EyePACS `test` folder (~53k) plus the
+   training split's images (labels unused); validation/test patients excluded. Plan: preprocess `data\test` with
+   `--enhance --tight-mask` at 512 px, pretrain ~50 epochs (~6-7 min/epoch, ~6 h), fine-tune with the exp8 recipe
+   and `--init`, compare paired with exp8 (`analyze.py --noise-floor 0.007`), then with the tricks vs the frozen
+   0.915. pre1 done (laptop, GPU): 50 epochs, 8.0 min/epoch (162 img/s, ~6.7 h); masked-pixel L1 loss
+   0.495 -> 0.401 (epoch 2) -> 0.356 (5) -> 0.339 (10) -> 0.320 (30) -> 0.309 (50), still easing down at the end
+   (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
+   visible (check `nvidia-smi`, power mode, restart); stop at once. Next: fine-tune exp10 with `--init`.
+   Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
    something I recognize" check, since today's model sees every photo only as a DR score. Next small step on the

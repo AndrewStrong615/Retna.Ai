@@ -15,7 +15,8 @@ What it checks:
      make data -> preprocess -> train 2 epochs -> test. All output files exist,
      best.pt reloads safely, the saved validation predictions reproduce the logged
      AUC and specificity exactly, and a second run into the same folder is refused.
-  6. The switches: preprocess --tight-mask (gray outside the eye, preprocess.json
+  6. Stage 2: pretrain.py leaves out validation/test patients; train.py --init loads its encoder.
+  7. The switches: preprocess --tight-mask (gray outside the eye, preprocess.json
      written), and a run with --pool gem --depth 34 whose saved architecture
      heatmap.py can rebuild.
 
@@ -180,6 +181,32 @@ def test_end_to_end(tmp):
     code4, log4 = run(["analyze.py", run_o, run_b, "--ensemble", "--both-eyes", "--final-test", "--n-boot", "50"])
     check("analyze.py: ensemble + both eyes, chosen on validation, applied to test once",
           code4 == 0 and "chosen w =" in log4 and "TEST SET, evaluated once" in log4)
+
+    # Stage 2: pretraining leaves out validation/test patients, and train.py --init uses its encoder.
+    pre = os.path.join(tmp, "pre")
+    code, log = run(["pretrain.py", "--images", processed, "--exclude-labels", labels, "--size", "96",
+                     "--epochs", "1", "--batch", "8", "--workers", "0", "--out", pre])
+    check("pretrain.py runs and writes encoder.pt", code == 0 and os.path.exists(os.path.join(pre, "encoder.pt")))
+    if code == 0:
+        sys.path.insert(0, HERE)
+        from pretrain import list_images
+        _, val_p, test_p = split_by_patient(load_labels(labels), seed=42)
+        paths, _, _ = list_images([processed], labels, 42)
+        used = {os.path.basename(x)[:-4].split("_")[0] for x in paths}
+        check("pretraining never sees validation or test patients",
+              not (used & (set(val_p["patient"]) | set(test_p["patient"]))))
+        out = os.path.join(tmp, "run_init")
+        code, log = run(["train.py", "--labels", labels, "--images", processed, "--size", "96", "--epochs", "1",
+                         "--batch", "8", "--workers", "0", "--pool", "gem", "--init",
+                         os.path.join(pre, "encoder.pt"), "--out", out])
+        loaded = False
+        if code == 0:
+            enc = torch.load(os.path.join(pre, "encoder.pt"), weights_only=True)["encoder"]
+            from model import build_model
+            m = build_model(18, "gem")
+            m.load_state_dict(enc, strict=False)
+            loaded = json.load(open(os.path.join(out, "config.json")))["init"] is not None
+        check("train.py --init starts from the pretrained encoder and records it", code == 0 and loaded)
 
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
