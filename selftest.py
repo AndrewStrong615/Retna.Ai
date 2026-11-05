@@ -182,6 +182,34 @@ def test_end_to_end(tmp):
     check("analyze.py: ensemble + both eyes, chosen on validation, applied to test once",
           code4 == 0 and "chosen w =" in log4 and "TEST SET, evaluated once" in log4)
 
+    # TTA: the 8 orientations are 8 different exact pixel shuffles; view 1 reproduces the run;
+    # validation must come first and the test eyes can be scored only once.
+    sys.path.insert(0, HERE)
+    from tta import eight_views
+    x = torch.arange(2 * 3 * 4 * 4, dtype=torch.float32).reshape(2, 3, 4, 4)
+    views = eight_views(x)
+    check("tta: 8 distinct orientations that only move pixels",
+          len({tuple(v.flatten().tolist()) for v in views}) == 8
+          and all(torch.equal(v.flatten().sort().values, x.flatten().sort().values) for v in views))
+    tta_out = os.path.join(tmp, "run_ordinal_tta")
+    tta_args = ["tta.py", "--run", run_o, "--images", processed, "--workers", "0", "--out", tta_out]
+    code_t0, log_t0 = run(tta_args + ["--split", "test"])
+    code_v, log_v = run(tta_args)
+    plain_ok = False
+    if code_v == 0:
+        info = json.load(open(os.path.join(tta_out, "tta.json")))
+        ckpt_o = torch.load(os.path.join(run_o, "best.pt"), map_location="cpu", weights_only=True)
+        plain_ok = abs(info["val_auc_plain"] - ckpt_o["val_auc"]) < 1e-9
+    code_t, log_t = run(tta_args + ["--split", "test"])
+    code_t2, log_t2 = run(tta_args + ["--split", "test"])
+    code_v2, log_v2 = run(tta_args)
+    code_a, log_a = run(["analyze.py", tta_out, "--both-eyes", "--final-test", "--n-boot", "50"])
+    check("tta: view 1 reproduces the run's validation AUC", plain_ok)
+    check("tta: validation first, test once, then validation is frozen",
+          code_t0 != 0 and code_v == 0 and code_t == 0 and code_t2 != 0 and code_v2 != 0)
+    check("tta: analyze.py reads its output (both eyes + final test)",
+          code_a == 0 and "TEST SET, evaluated once" in log_a)
+
     # Stage 2: pretraining leaves out validation/test patients, and train.py --init uses its encoder.
     pre = os.path.join(tmp, "pre")
     code, log = run(["pretrain.py", "--images", processed, "--exclude-labels", labels, "--size", "96",
@@ -207,6 +235,13 @@ def test_end_to_end(tmp):
             m.load_state_dict(enc, strict=False)
             loaded = json.load(open(os.path.join(out, "config.json")))["init"] is not None
         check("train.py --init starts from the pretrained encoder and records it", code == 0 and loaded)
+
+    # Gradient accumulation: --accum 2 runs (pieces of 4 images) and is recorded.
+    out = os.path.join(tmp, "run_accum")
+    code, log = run(["train.py", "--labels", labels, "--images", processed, "--size", "96", "--epochs", "1",
+                     "--batch", "8", "--accum", "2", "--workers", "0", "--out", out])
+    check("train.py --accum 2 runs and records it",
+          code == 0 and json.load(open(os.path.join(out, "config.json")))["accum"] == 2)
 
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")

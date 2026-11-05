@@ -37,12 +37,18 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   diagnostics), best.pt, val/test_predictions.csv and test_results.json; it refuses a folder that already holds
   results unless `--overwrite`. Architecture switches (defaults = exp1-exp6 behavior, checked bit-for-bit):
   `--depth 18|34`, `--pool avg|gem`, `--dropout` (0.2); the architecture is saved in best.pt as `arch`.
+  `--accum N` (gradient accumulation): each batch goes through the GPU in N pieces, same recipe with less GPU
+  memory (BatchNorm statistics per piece); `--accum 1` (default) is bit-identical to the old loop (checked on CPU).
 - `pretrain.py` (Stage 2): SimMIM-style masked image modeling, written from scratch, for the SAME network as
   Stage 1: hide 60% of the image in 32x32 squares (learned mask color), the ResNet stem+stages encode, a 1x1 conv
   + PixelShuffle redraws the pixels, L1 loss on hidden pixels only. Leaves out every image of the labeled
   validation/test patients (`--exclude-labels`, same `--split-seed` as train.py). Saves `encoder.pt` and
   `last.pt` every epoch (`--resume`), reconstruction pictures every `--example-every` epochs. `train.py --init
   <encoder.pt>` starts disease training from it (same `--depth`/`--pool` required; recorded in config.json).
+- `tta.py`: test-time augmentation for a finished run: scores each eye in the 8 exact orientations of a square
+  (flips, 90/180/270 turns) and averages. Writes a run-like folder (`<run>_tta`) that analyze.py reads unchanged.
+  Validation first (new 90%-sensitivity cutoff chosen there); `--split test` only once, after deciding; refuses
+  to redo either. Its self-check: view 1 reproduces the run's own val AUC.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -118,8 +124,8 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). Still open: a val-only
-  re-scorer so exp2's best.pt can be paired with later runs, TTA. Noise check done (exp7b): seed-to-seed
+- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). TTA (`tta.py`) done. Still open: a
+  val-only re-scorer so exp2's best.pt can be paired with later runs. Noise check done (exp7b): seed-to-seed
   difference 0.0001 on one pair; working `--noise-floor 0.007`.
 
 ## Experiments

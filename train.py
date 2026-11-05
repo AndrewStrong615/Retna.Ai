@@ -303,6 +303,10 @@ def main():
     p.add_argument("--size", type=int, default=384)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch", type=int, default=32)
+    p.add_argument("--accum", type=int, default=1,
+                   help="split each batch into this many pieces that go through the GPU one after "
+                        "another (gradient accumulation): same recipe, less GPU memory. "
+                        "Use 2 if 768 px runs out of memory")
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--wd", type=float, default=0.05)
     p.add_argument("--workers", type=int, default=None,
@@ -337,6 +341,8 @@ def main():
     p.add_argument("--seed", type=int, default=42,
                    help="weight initialization, shuffling and augmentation")
     args = p.parse_args()
+    if args.accum < 1 or args.batch % args.accum:
+        raise SystemExit(f"--batch {args.batch} must split evenly into --accum {args.accum} pieces.")
 
     # Never mix two runs' files in one folder: a leftover test_results.json or
     # best.pt from an earlier run could be mistaken for this run's.
@@ -389,17 +395,21 @@ def main():
           f" ({'enhanced' if enhanced else 'plain'} preprocessing)")
     train_tf, eval_tf = make_transforms(args.size, mean, std, fill, args.rotate_interp)
 
-    def loader(part, tf, n_workers, shuffle=False, keep_workers=False):
+    def loader(part, tf, n_workers, shuffle=False, keep_workers=False, batch=args.batch):
         # persistent_workers keeps the helper processes alive between epochs.
         # Starting them is slow on Windows (each one loads PyTorch again), so
         # without it every epoch would begin with a long pause.
-        return DataLoader(FundusDataset(part, args.images, tf), batch_size=args.batch,
-                          shuffle=shuffle, drop_last=shuffle and len(part) > args.batch,
+        return DataLoader(FundusDataset(part, args.images, tf), batch_size=batch,
+                          shuffle=shuffle, drop_last=shuffle and len(part) > batch,
                           num_workers=n_workers, pin_memory=use_amp,
                           persistent_workers=keep_workers and n_workers > 0)
 
     eval_workers = max(1, workers // 2) if workers else 0
-    train_loader = loader(train_df, train_tf, workers, shuffle=True, keep_workers=True)
+    # With --accum N the training loader hands out pieces of batch/N images; N pieces
+    # together make one batch (see the training loop). Evaluation needs no gradients,
+    # so it uses far less memory and keeps whole batches.
+    train_loader = loader(train_df, train_tf, workers, shuffle=True, keep_workers=True,
+                          batch=args.batch // args.accum)
     val_loader = loader(val_df, eval_tf, eval_workers, keep_workers=True)
     # (the test loader is only created at the very end, for the single test pass)
 
@@ -456,8 +466,10 @@ def main():
 
     # Learning rate schedule: ramp up gently at the start (random weights are
     # fragile), then smoothly decrease so the model settles into a good solution.
-    total_steps = args.epochs * max(len(train_loader), 1)
-    warmup = max(1, min(len(train_loader), total_steps // 5))
+    # One "step" = one weight update = one batch (with --accum, N pieces).
+    steps_per_epoch = math.ceil(len(train_loader) / args.accum)
+    total_steps = args.epochs * max(steps_per_epoch, 1)
+    warmup = max(1, min(steps_per_epoch, total_steps // 5))
 
     def lr_factor(step):
         if step < warmup:
@@ -477,20 +489,29 @@ def main():
         running, seen, skipped, waited = 0.0, 0, 0, 0.0
         train_scores, train_grades_seen = [], []
         t_ready = time.time()
-        for x, g in train_loader:
+        for i, (x, g) in enumerate(train_loader):
             waited += time.time() - t_ready             # time spent waiting for the next batch
             x = x.to(device, non_blocking=True, memory_format=memory_format)
             g = g.to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
                 s = model(x)                               # 1. forward: make predictions
             loss = loss_fn(s.float(), g)                   # 2. measure how wrong they are
-            optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()                  # 3. backward: compute gradients
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(params, 1.0)          # stop rare huge updates
-            scaler.step(optimizer)                         # 4. nudge every weight downhill
-            scaler.update()
-            scheduler.step()
+            # Gradient accumulation (--accum N): backward() ADDS to the stored gradients,
+            # so N pieces, each with its loss divided by N, leave the same gradient as one
+            # big batch, using only one piece's worth of GPU memory. (The one difference:
+            # BatchNorm computes its statistics per piece.) With N = 1 every piece is a
+            # whole batch and this is exactly the plain one-batch-one-step loop.
+            first_piece = i % args.accum == 0
+            last_piece = (i + 1) % args.accum == 0 or i + 1 == len(train_loader)
+            if first_piece:
+                optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss / args.accum if args.accum > 1 else loss).backward()  # 3. gradients
+            if last_piece:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(params, 1.0)      # stop rare huge updates
+                scaler.step(optimizer)                     # 4. nudge every weight downhill
+                scaler.update()
+                scheduler.step()
             # .item() waits for the GPU to finish this step. That also keeps the
             # "waiting for data" timer honest; if you ever remove it, put
             # torch.cuda.synchronize() here instead.
