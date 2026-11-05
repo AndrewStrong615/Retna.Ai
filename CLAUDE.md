@@ -192,7 +192,22 @@ Candidates fixed in advance (two only, to limit optimism from trying many combin
 DECISION: the Stage 2a system is **A**: exp10 alone (pretrained ResNet-18 + GeM), each eye's score blended with its
 fellow eye's (w = 0.40), cutoff for 90% sensitivity, all chosen on validation. It beats the frozen Stage 1 system on
 validation (0.924 vs 0.920, spec 73.1% vs 71.6%) with one model instead of two. Official test result: one run of
-`python analyze.py runs\exp10 --both-eyes --final-test` (result to be recorded here, not used to choose anything).
+`python analyze.py runs\exp10 --both-eyes --final-test` (recorded below, not used to choose anything).
+
+## Stage 2a result (frozen)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| | AUC | Sensitivity | Specificity | Models |
+|---|---|---|---|---|
+| Stage 1 frozen (exp8 + exp9, both eyes), test | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 2 |
+| Stage 2a validation (choices made here) | 0.924 | 90.0% | 73.1% | 1 |
+| **Stage 2a test (official, touched once)** | **0.921** [0.907-0.934] | **89.9%** [87.6-92.2%] | **71.9%** [70.0-73.7%] | **1** |
+
+Validation to test dropped only 0.003 AUC, so the choices generalize within EyePACS. Versus Stage 1 on test: +0.006
+AUC, same sensitivity, specificity +0.2 points, with ONE model instead of two (half the compute per photo). The test
+ranges overlap, so on test alone this is "at least as good, simpler", not a proven gain; the proven gain is the paired
+validation check (exp10 vs exp8: +0.0086, both checks passed). This is the new benchmark for later stages.
 
 ## Working with me
 
@@ -211,7 +226,7 @@ and don't swap my hand-written components for library versions without asking.
    0.915. pre1 done (laptop, GPU): 50 epochs, 8.0 min/epoch (162 img/s, ~6.7 h); masked-pixel L1 loss
    0.495 -> 0.401 (epoch 2) -> 0.356 (5) -> 0.339 (10) -> 0.320 (30) -> 0.309 (50), still easing down at the end
    (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
-   visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924 (see "Stage 2a decision").
+   visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result").
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
