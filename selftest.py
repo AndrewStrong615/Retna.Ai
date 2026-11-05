@@ -143,7 +143,7 @@ def test_end_to_end(tmp):
         ckpt = torch.load(os.path.join(out, "best.pt"), map_location="cpu", weights_only=True)
         check(f"[{target}] best.pt reloads with weights_only=True", "loss" in ckpt and ckpt["target"] == target)
 
-        val = pd.read_csv(os.path.join(out, "val_predictions.csv"), float_precision="round_trip")
+        val = pd.read_csv(os.path.join(out, "val_predictions.csv"), converters={"score": float})
         labels_v = val["level"] >= 2
         history = json.load(open(os.path.join(out, "history.json")))
         best_row = next(r for r in history if r["epoch"] == ckpt["epoch"])
@@ -157,7 +157,7 @@ def test_end_to_end(tmp):
         results = json.load(open(os.path.join(out, "test_results.json")))
         check(f"[{target}] test_results.json is complete",
               {"auc", "sensitivity", "specificity", "threshold", "best_epoch"} <= set(results))
-        test = pd.read_csv(os.path.join(out, "test_predictions.csv"), float_precision="round_trip")
+        test = pd.read_csv(os.path.join(out, "test_predictions.csv"), converters={"score": float})
         labels_t = test["level"] >= 2
         sens_t, spec_t = sens_spec(labels_t, test["referred"], True)
         check(f"[{target}] test predictions reproduce test_results.json",
@@ -177,6 +177,9 @@ def test_end_to_end(tmp):
     check("analyze.py: report, paired comparison, and refusal to compare on test",
           code1 == 0 and "Per patient" in log1 and code2 == 0 and "Verdict" in log2
           and code3 != 0 and "validation only" in log3)
+    code4, log4 = run(["analyze.py", run_o, run_b, "--ensemble", "--both-eyes", "--final-test", "--n-boot", "50"])
+    check("analyze.py: ensemble + both eyes, chosen on validation, applied to test once",
+          code4 == 0 and "chosen w =" in log4 and "TEST SET, evaluated once" in log4)
 
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")

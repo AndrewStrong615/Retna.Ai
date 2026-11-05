@@ -145,7 +145,7 @@ def main():
     cam = GradCAM(model)
     _, eval_tf = make_transforms(ckpt["size"], ckpt["mean"], ckpt["std"])
 
-    val = pd.read_csv(os.path.join(args.run, "val_predictions.csv"), float_precision="round_trip")
+    val = pd.read_csv(os.path.join(args.run, "val_predictions.csv"), converters={"score": float})
     if "referred" not in val:                     # older runs: recompute the decision
         val["referred"] = val["score"] >= ckpt["threshold"]
     test_names = set()

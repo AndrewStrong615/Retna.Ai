@@ -1,7 +1,7 @@
 # Retina-from-scratch
 
 A from-scratch deep learning project to detect eye disease from retinal images.
-**Stage 1 (current):** classify referable diabetic retinopathy (grade >= 2) from
+**Stage 1 (done, see "Stage 1 result"):** classify referable diabetic retinopathy (grade >= 2) from
 color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `image,level`).
 
 ## Hard rules
@@ -46,6 +46,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
   validation only; `--split test` is for reporting one run's final numbers, never for choosing.
+  Free tricks: `--ensemble` (average several runs' standardized scores) and `--both-eyes` (blend each eye's
+  score with the fellow eye's, weight w chosen on validation); `--final-test` applies the validation choices
+  (scales, w, 90%-sensitivity cutoff) to the test set once, for a frozen result.
 - `make_synthetic_data.py`: tiny fake EyePACS-style dataset (cartoon eyes, obvious lesions) for CPU smoke tests.
   Its docstring has the smoke-test commands.
 - `requirements.txt`: dependencies, with the versions the smoke test passed on.
@@ -76,7 +79,7 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Train AUC is measured on augmented images with dropout on, while the weights change, so it normally sits below
   val AUC; overfitting shows as train AUC clearly above val AUC late in a run.
 - Predictions CSVs: `referred` is the decision the run made; read `score` with
-  `pd.read_csv(path, float_precision="round_trip")` to get it back exactly. For `--target binary` with
+  `pd.read_csv(path, converters={"score": float})` to get it back exactly. For `--target binary` with
   pos_weight, `prob_referable` is inflated by the class weighting (ranking only, not a real risk).
 
 ## Status
@@ -107,9 +110,9 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Part 2: `analyze.py` (done), preprocess.json (done). Still open: fellow-eye blending on validation, a val-only
-  re-scorer so exp2's best.pt can be paired with later runs, TTA. Planned noise check: exp6 repeated with
-  `--seed 43` (same split) to measure run-to-run noise for `analyze.py --noise-floor`.
+- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). Still open: a val-only
+  re-scorer so exp2's best.pt can be paired with later runs, TTA. Noise check done (exp7b): seed-to-seed
+  difference 0.0001 on one pair; working `--noise-floor 0.007`.
 
 ## Experiments
 
@@ -123,6 +126,10 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp4 | as exp3 but `--target binary` (paired with exp3: same split, same everything else) | 0.846 (30) | 0.824 / 87.3% / 50.6% | Same curve shape as exp3. vs exp3: +0.002 val AUC = a tie (noise ~0.02). vs exp2: +0.002 = a tie, so the rotation fix made no measurable difference either. |
 | exp5 | as exp3 but 512 px (`processed_512_enhanced`, `--size 512`) | 0.852 (27) | 0.828 / 88.0% / 47.9% | +0.008 val AUC over exp3 (same recipe at 384 px): small, under the ~0.02 noise, so "maybe slightly better", not proven. Same shape: plateau from epoch ~21 (0.848-0.852), train AUC = val AUC (0.847 vs 0.851). Epochs barely slower than at 384 px (~2.35 vs ~2.2 min), so 512 px stays. |
 | exp6 | as exp5 but `--epochs 60` | **0.872** (48) | 0.855 / 87.5% / 57.2% | +0.020 val AUC over exp5, the first change since enhance to beat the ~0.85 ceiling (test AUC and specificity moved the same way). Slow climb until ~epoch 30, then steady gains as the LR decays; plateau from ~47. Train AUC now ahead of val (0.893 vs 0.871): the model starts fitting training eyes better, but val loss keeps falling, so no harmful overfitting. New base recipe: 512 px, 60 epochs (~2.4 h). |
+| exp7 | as exp6 but images from `preprocess.py --enhance --tight-mask` (`processed_512_enhanced_tight`) | **0.888** (56) | 0.883 / 90.5% / 60.0% | Paired vs exp6 (analyze.py, same 5,268 val eyes): +0.016, 95% range +0.007 to +0.026, better in 100% of resamples, so beyond validation-sampling luck; seed noise not yet measured. Learned faster (0.874 at epoch 30 vs ~0.850 for exp6); plateau from ~45; train AUC 0.904 vs val 0.888, val loss lowest at the end. Some epochs ~2.85 min instead of ~2.35 (laptop heat). New base recipe: 512 px, tight mask, 60 epochs. |
+| exp7b | exp7 repeated with `--seed 43` (noise check: same recipe, same split, different random init/order) | 0.888 | (not recorded) | Paired vs exp7: -0.0001, 95% range -0.007 to +0.006: the recipe reproduces almost exactly. One seed pair is a single sample, so use a cautious working noise floor of ~0.005-0.01 rather than 0.0001. With it, exp7 vs exp6 (+0.016) passes both checks: the tight mask is a confirmed improvement. |
+| exp8 | as exp7 but `--pool gem` | **0.896** (50) | 0.889 / 91.8% / 60.8% | Paired vs exp7: +0.008, 95% range +0.001 to +0.015, better in 99% of resamples; above the 0.007 noise floor, so it passes both checks, narrowly. Learned much faster early (0.737 at epoch 2 vs 0.685; grade means separated by epoch 4); same healthy ending (plateau from ~43, train AUC 0.912 vs val 0.895, val loss lowest at the end). Steady 2.3 min/epoch with fans at max. New base recipe: 512 px, tight mask, 60 epochs, GeM. |
+| exp9 | as exp8 but `--depth 34` (ResNet-34, 21.3M weights) | 0.896 (50) | 0.888 / 89.9% / 63.8% | A tie with exp8 (-0.0002 val AUC), with the same train-val gap (0.911 vs 0.895) and ~60% slower epochs (~3.7 vs ~2.3 min). Model size is not the limit at this data size; ResNet-18 stays. Its val specificity at 90% sensitivity ran a little higher (0.645 vs 0.618 at epoch 50), but at the same AUC that is noise in the operating point, not a better model. |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
@@ -137,9 +144,35 @@ black area outside the eye, next to the bright enhancement rim. Hence the `--tig
 Reading exp5: resolution did not break the ~0.85 ceiling either. In every run since exp2, train AUC = val AUC at
 the end and the curve flattens as the LR decays, so the model is not fitting even the training images better: it is
 under-trained or too small, not overfitting. exp6 (60 epochs) confirmed it: training length was the limit.
-Queue after exp6, one change each against exp6 (512 px, 60 epochs): `--tight-mask` preprocessing, `--pool gem`,
-`--depth 34`, lower `--dropout`/`--wd`. GeM learned more slowly than avg pooling on the tiny synthetic set
-(val AUC 0.92 vs 0.97 after 20 epochs), so treat it as an open question, not an expected win.
+exp7 (tight mask) beat exp6 in a paired comparison, so the base recipe is now 512 px + `--tight-mask` + 60 epochs. exp7b (seed repeat) matched exp7 within 0.0001, so the old "~0.02 noise" rule of thumb was too cautious: with
+paired comparisons, differences of ~0.01 can be real. Working rule: a change counts if `analyze.py` check 1 passes
+and the gain exceeds `--noise-floor 0.007`. exp8 (GeM) passed narrowly and joins the recipe. Next, one change each
+against exp8: ~~`--depth 34`~~ (exp9: tie, slower), lower `--dropout`/`--wd`, more diverse training data (APTOS/DDR in the train split only). (On the tiny synthetic set GeM had looked slower than avg pooling; on real photos it was faster and better.)
+Gains so far: +0.020 (60 epochs), +0.016 (tight mask), +0.008 (GeM), 0.000 (ResNet-34): the recipe is close to its
+limit. Freeze candidate: the exp8 recipe (512 px, tight mask, 60 epochs, GeM, ResNet-18, ordinal target).
+Free tricks on exp8 (analyze.py, validation, paired vs exp8 alone at 0.896 / spec 61.8%):
+- `--ensemble` exp8 + exp9: 0.901 (+0.005, range +0.002 to +0.008), spec 64.8%.
+- `--both-eyes`: 0.917 (+0.021, range +0.016 to +0.026), spec 70.6%; w = 0.45 chosen on a smooth, flat peak
+  (0.40-0.50 all ~0.917), so the choice barely matters. The biggest single gain since 60 epochs.
+- `--ensemble --both-eyes` (exp8 + exp9, w = 0.40): **0.920** (+0.024, range +0.019 to +0.030), spec 71.6%.
+DECISION (made on validation, before touching test): the frozen Stage 1 system is the exp8 + exp9 ensemble with
+both-eyes blending (w = 0.40, cutoff for 90% sensitivity, all chosen on validation). Its official test result
+comes from one run of `python analyze.py runs\exp8 runs\exp9 --ensemble --both-eyes --final-test`.
+
+## Stage 1 result (frozen)
+
+System: ensemble of exp8 + exp9 (512 px, tight mask, 60 epochs, GeM, ordinal target; ResNet-18 and ResNet-34),
+each eye's score blended with its fellow eye's (w = 0.40), cutoff for 90% sensitivity; all chosen on validation.
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| | AUC | Sensitivity | Specificity |
+|---|---|---|---|
+| Validation (choices made here) | 0.920 | 90.0% | 71.6% |
+| **Test (official, touched once)** | **0.915** [0.900-0.928] | **89.9%** [87.6-92.0%] | **71.7%** [69.8-73.6%] |
+
+Validation to test dropped only 0.005 AUC and specificity held, so the choices generalize within EyePACS.
+From exp1: test AUC 0.638 -> 0.915; healthy eyes cleared at ~90% sensitivity 23% -> 72%. This is the benchmark
+Stage 2 must beat. Not yet known: performance on other hospitals' photos (Stage 4).
 
 ## Working with me
 
@@ -148,7 +181,7 @@ and don't swap my hand-written components for library versions without asking.
 
 ## Roadmap
 
-1. Stage 1: from-scratch CNN for referable DR (this).
+1. Stage 1: from-scratch CNN for referable DR. Done: test AUC 0.915, sens 89.9%, spec 71.7% (see above).
 2. Stage 2: self-supervised pretraining (masked autoencoder, written from scratch) on pooled unlabeled retinal images.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
