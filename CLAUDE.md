@@ -39,6 +39,10 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   `--depth 18|34`, `--pool avg|gem`, `--dropout` (0.2); the architecture is saved in best.pt as `arch`.
   `--accum N` (gradient accumulation): each batch goes through the GPU in N pieces, same recipe with less GPU
   memory (BatchNorm statistics per piece); `--accum 1` (default) is bit-identical to the old loop (checked on CPU).
+  `--extra-labels CSV --extra-images DIR`: more labeled photos added to the TRAINING split only (validation/test
+  eyes unchanged, so runs stay paired); refuses any validation/test patient and a folder preprocessed differently
+  (preprocess.json); mean/std and background stay measured on the original training photos; recorded in config.json
+  (`extra`) and `extra_split.csv`. Without the flags, training is bit-identical to before (checked on CPU).
 - `pretrain.py` (Stage 2): SimMIM-style masked image modeling, written from scratch, for the SAME network as
   Stage 1: hide 60% of the image in 32x32 squares (learned mask color), the ResNet stem+stages encode, a 1x1 conv
   + PixelShuffle redraws the pixels, L1 loss on hidden pixels only. Leaves out every image of the labeled
@@ -49,6 +53,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   (flips, 90/180/270 turns) and averages. Writes a run-like folder (`<run>_tta`) that analyze.py reads unchanged.
   Validation first (new 90%-sensitivity cutoff chosen there); `--split test` only once, after deciding; refuses
   to redo either. Its self-check: view 1 reproduces the run's own val AUC.
+- `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
+  of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
+  labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -253,6 +260,18 @@ Validation to test dropped only 0.003 AUC, so the choices generalize within EyeP
 AUC, same sensitivity, specificity +0.2 points, with ONE model instead of two (half the compute per photo). The test
 ranges overlap, so on test alone this is "at least as good, simpler", not a proven gain; the proven gain is the paired
 validation check (exp10 vs exp8: +0.0086, both checks passed). This is the new benchmark for later stages.
+
+## Next: more labeled data (exp12)
+
+Evidence: size (exp9) and resolution (exp11) gave nothing, the train-val gap keeps growing (exp11: 0.936 vs 0.907),
+so the limit is the number of labeled photos. Source: `testLabels15.csv`, the published grades of the 53,576
+EyePACS 2015 test photos (from the Kaggle mirror c7934597/resized-2015-2019-diabetic-retinopathy-detection,
+`labels/`; keep it in `retina-data\data`, never in the repo). Checked: 53,576 unique `N_left/N_right` names, both
+eyes for each of 26,788 patients, 0 patients shared with trainLabels.csv (so none with our val/test), grade mix
+73.8/7.0/14.7/2.3/2.3% vs train 73.5/7.0/15.1/2.5/2.0%. The same photos were used UNLABELED in pretraining (pre1).
+Plan: (1) `check_labels.py` with exp10 on these photos (expect AUC ~0.9 if genuine); (2) exp12 = exp10 recipe +
+`--extra-labels ...\testLabels15.csv --extra-images ...\processed_512_enhanced_tight_unlabeled` (~78k training
+photos, ~3x longer epochs); (3) paired vs exp10; (4) TTA + both eyes vs the frozen 0.929 (val) / 0.925 (test).
 
 ## Working with me
 
