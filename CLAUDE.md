@@ -202,8 +202,10 @@ validation (0.924 vs 0.920, spec 73.1% vs 71.6%) with one model instead of two. 
 
 TTA on exp10 (`tta.py`, 8 orientations, validation only; plain view reproduced 0.9047 exactly): 0.9115, paired vs
 exp10 +0.0069, 95% range +0.004 to +0.010, better in 100% of resamples (check 1 passed). Check 2 (training luck) does
-not apply: TTA reuses the SAME weights, so no seed noise enters the difference; to confirm the gain is not specific
-to one model, repeat it on exp8/exp9. With `--both-eyes`: **0.929** (w = 0.40), spec 75.1% (vs 0.924 / 73.1%).
+not apply: TTA reuses the SAME weights, so no seed noise enters the difference. Repeated on two other models
+(plain views again reproduced their runs exactly): exp8 0.8961 -> 0.9014 (+0.0053, spec 61.8% -> 65.9%), exp9
+0.8959 -> 0.9033 (+0.0074, spec 67.1%). Three models, three gains of +0.005 to +0.007: TTA is a confirmed,
+general improvement and joins the standard tricks (tta.py, then --both-eyes). With `--both-eyes`: **0.929** (w = 0.40), spec 75.1% (vs 0.924 / 73.1%).
 Not test-evaluated: bundle with the 768 px run (exp11) into one next system and one test pass, rather than spending
 a test evaluation on each small trick.
 
