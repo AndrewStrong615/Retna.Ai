@@ -269,7 +269,11 @@ EyePACS 2015 test photos (from the Kaggle mirror c7934597/resized-2015-2019-diab
 `labels/`; keep it in `retina-data\data`, never in the repo). Checked: 53,576 unique `N_left/N_right` names, both
 eyes for each of 26,788 patients, 0 patients shared with trainLabels.csv (so none with our val/test), grade mix
 73.8/7.0/14.7/2.3/2.3% vs train 73.5/7.0/15.1/2.5/2.0%. The same photos were used UNLABELED in pretraining (pre1).
-Plan: (1) `check_labels.py` with exp10 on these photos (expect AUC ~0.9 if genuine); (2) exp12 = exp10 recipe +
+Authenticity check DONE (`check_labels.py`, exp10, 5,000 random photos, all 53,576 have a photo): AUC 0.9014 vs
+exp10's own val 0.9047; at its val cutoff sens 91.0% / spec 64.3% (val: 90.0 / 66.0); mean score by grade
+-1.32 / -0.68 / +1.66 / +3.86 / +5.15 (val: -1.34 / -0.99 / +1.64 / +4.04 / +5.03): genuine, same grading.
+(Also an independent check that exp10 generalizes: 0.901 on 5,000 eyes it never saw labeled, in line with its
+test AUC 0.903.) Plan: (1) done; (2) exp12 = exp10 recipe +
 `--extra-labels ...\testLabels15.csv --extra-images ...\processed_512_enhanced_tight_unlabeled` (~78k training
 photos, ~3x longer epochs); (3) paired vs exp10; (4) TTA + both eyes vs the frozen 0.929 (val) / 0.925 (test).
 
