@@ -219,7 +219,25 @@ Candidates fixed in advance (after the TTA check, before exp11 finished), same "
 DECISION: the Stage 2a v2 system is **C1**: exp10 (512 px, pretrained ResNet-18 + GeM), each eye scored in the 8
 orientations and averaged (tta.py), then blended with the fellow eye (w = 0.40), cutoff for 90% sensitivity, all
 chosen on validation. Official test result: one run of `python tta.py --run runs\exp10 --images
-...\processed_512_enhanced_tight --split test`, then `python analyze.py runs\exp10_tta --both-eyes --final-test`.
+...\processed_512_enhanced_tight --split test`, then `python analyze.py runs\exp10_tta --both-eyes --final-test`. Recorded below.
+
+## Stage 2a v2 result (frozen, current best)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| System (test, each touched once) | AUC | Sensitivity | Specificity | Models x views |
+|---|---|---|---|---|
+| Stage 1: exp8 + exp9, both eyes | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 2 x 1 |
+| Stage 2a: exp10, both eyes | 0.921 [0.907-0.934] | 89.9% [87.6-92.2%] | 71.9% [70.0-73.7%] | 1 x 1 |
+| Stage 2a v2 validation (choices made here) | 0.929 | 90.0% | 75.1% | 1 x 8 |
+| **Stage 2a v2: exp10 + TTA, both eyes** | **0.925** [0.912-0.937] | **90.3%** [88.1-92.5%] | **73.5%** [71.6-75.3%] | **1 x 8** |
+
+Validation to test dropped 0.004 AUC, as in the earlier systems: the choices generalize within EyePACS. Versus
+Stage 2a on test: +0.004 AUC and +1.6 points of specificity at the same ~90% sensitivity (about 16 more healthy eyes
+cleared per 1,000). The test ranges overlap, so the proof that TTA helps is the validation evidence (4 models,
++0.005 to +0.007 each), not this single test comparison. Cost: 8 forward passes per photo (still one model, ~0.1 s
+per eye on the laptop GPU). This is the benchmark for the next improvement (more labeled data).
+
 
 ## Stage 2a result (frozen)
 
@@ -253,7 +271,8 @@ and don't swap my hand-written components for library versions without asking.
    0.915. pre1 done (laptop, GPU): 50 epochs, 8.0 min/epoch (162 img/s, ~6.7 h); masked-pixel L1 loss
    0.495 -> 0.401 (epoch 2) -> 0.356 (5) -> 0.339 (10) -> 0.320 (30) -> 0.309 (50), still easing down at the end
    (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
-   visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result").
+   visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result"); with TTA too
+   (Stage 2a v2): TEST 0.925 / 90.3% / 73.5%, the current best.
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
