@@ -145,7 +145,7 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp8 | as exp7 but `--pool gem` | **0.896** (50) | 0.889 / 91.8% / 60.8% | Paired vs exp7: +0.008, 95% range +0.001 to +0.015, better in 99% of resamples; above the 0.007 noise floor, so it passes both checks, narrowly. Learned much faster early (0.737 at epoch 2 vs 0.685; grade means separated by epoch 4); same healthy ending (plateau from ~43, train AUC 0.912 vs val 0.895, val loss lowest at the end). Steady 2.3 min/epoch with fans at max. New base recipe: 512 px, tight mask, 60 epochs, GeM. |
 | exp9 | as exp8 but `--depth 34` (ResNet-34, 21.3M weights) | 0.896 (50) | 0.888 / 89.9% / 63.8% | A tie with exp8 (-0.0002 val AUC), with the same train-val gap (0.911 vs 0.895) and ~60% slower epochs (~3.7 vs ~2.3 min). Model size is not the limit at this data size; ResNet-18 stays. Its val specificity at 90% sensitivity ran a little higher (0.645 vs 0.618 at epoch 50), but at the same AUC that is noise in the operating point, not a better model. |
 | exp10 | as exp8 but `--init runs\pre1\encoder.pt` (Stage 2a: SimMIM-pretrained start, 50 epochs on ~78k unlabeled photos) | **0.905** (50) | 0.903 / 90.3% / 65.2% | Paired vs exp8: +0.0086, 95% range +0.002 to +0.016, better in 99% of resamples, above the 0.007 noise floor: passes both checks, so self-supervised pretraining is a confirmed improvement (spec at 90% sens 61.8% -> 66.0%). Clear head start: 0.765 at epoch 1, 0.783 at epoch 2 (exp8: 0.737), 0.890 at epoch 29-30; plateau from ~41 (0.902-0.905). Train-val gap wider than exp8 (train AUC 0.934 vs val 0.903, exp8 0.912 vs 0.895), but val loss lowest near the end (0.2076 at 50) and flat after, so no harmful overfitting. Grade means swing epoch to epoch early (score offset shifts; ranking stable). Same speed as exp8 (~2.25 min/epoch). |
-| exp11 | as exp10 but 768 px (`processed_768_enhanced_tight`, `--size 768`, `--init runs\pre1\encoder.pt`, batch 32, no `--accum`) | 0.909 (50) | 0.907 / 91.6% / 62.5% | Raw +0.004 val AUC over exp10, under the 0.007 noise floor before any check; paired check (`analyze.py runs\exp10 runs\exp11 --noise-floor 0.007`) pending. Same curve shape as exp10 (0.774 at epoch 1, 0.896 at 30, plateau 0.906-0.909 from ~44; train AUC 0.936 vs val 0.907). ~2.9x slower, not 2.25x: 67 img/s, 6.5 min/epoch (~6.6 h), some epochs 45-57 img/s with data waits of 13-17% (laptop busy/hot). |
+| exp11 | as exp10 but 768 px (`processed_768_enhanced_tight`, `--size 768`, `--init runs\pre1\encoder.pt`, batch 32, no `--accum`) | 0.909 (50) | 0.907 / 91.6% / 62.5% | Paired vs exp10: +0.0044, 95% range -0.002 to +0.011, better in 92% of resamples: fails both checks, a TIE. Spec at 90% sens lower (62.9% vs 66.0%). 768 px is not worth ~2.9x the compute; 512 px stays. TTA on exp11: 0.9090 -> 0.9140 (+0.0049), a 4th model where TTA helps. Same curve shape as exp10 (0.774 at epoch 1, 0.896 at 30, plateau 0.906-0.909 from ~44; train AUC 0.936 vs val 0.907). ~2.9x slower, not 2.25x: 67 img/s, 6.5 min/epoch (~6.6 h), some epochs 45-57 img/s with data waits of 13-17% (laptop busy/hot). |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
@@ -209,6 +209,17 @@ not apply: TTA reuses the SAME weights, so no seed noise enters the difference. 
 general improvement and joins the standard tricks (tta.py, then --both-eyes). With `--both-eyes`: **0.929** (w = 0.40), spec 75.1% (vs 0.924 / 73.1%).
 Not test-evaluated: bundle with the 768 px run (exp11) into one next system and one test pass, rather than spending
 a test evaluation on each small trick.
+
+## Stage 2a v2 decision (made on validation, before touching test)
+
+Candidates fixed in advance (after the TTA check, before exp11 finished), same "within ~0.003, take the simpler" rule:
+- C1: exp10 + TTA + `--both-eyes`: val AUC **0.929**, spec 75.1% (w = 0.40).
+- C2: exp11 (768 px) + TTA + `--both-eyes`, ONLY if exp11 first passed the paired check vs exp10. It did not (tie), so
+  C2 is out; its TTA-only val AUC (0.914 vs exp10's 0.9115, +0.0025) would not have cleared the margin either.
+DECISION: the Stage 2a v2 system is **C1**: exp10 (512 px, pretrained ResNet-18 + GeM), each eye scored in the 8
+orientations and averaged (tta.py), then blended with the fellow eye (w = 0.40), cutoff for 90% sensitivity, all
+chosen on validation. Official test result: one run of `python tta.py --run runs\exp10 --images
+...\processed_512_enhanced_tight --split test`, then `python analyze.py runs\exp10_tta --both-eyes --final-test`.
 
 ## Stage 2a result (frozen)
 
