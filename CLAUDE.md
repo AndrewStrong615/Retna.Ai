@@ -289,7 +289,7 @@ The winner gets one test pass (`tta.py --split test` for exp12, then `analyze.py
 Results (validation): exp12 passed the paired check (+0.0195). D1 = **0.944** (w = 0.40, flat peak 0.35-0.45 at
 0.944), spec 83.3% (vs C1 0.929 / 75.1%). D2 = 0.942, spec 81.6%: BELOW D1, so averaging in the weaker exp10 only
 dilutes exp12. Both-eyes added +0.015 on top of exp12 + TTA (vs +0.017 on exp10): still large, a little smaller.
-DECISION: the next system (Stage 2b-data, "v3") is **D1**: exp12 (pretrained ResNet-18 + GeM, 512 px, trained on
+DECISION: the next system ("Stage 2 v3") is **D1**: exp12 (pretrained ResNet-18 + GeM, 512 px, trained on
 78k labeled photos) + 8-view TTA + fellow-eye blend (w = 0.40), cutoff for 90% sensitivity, all chosen on
 validation. Official test: `python tta.py --run runs\exp12 --images ...\processed_512_enhanced_tight --split
 test`, then `python analyze.py runs\exp12_tta --both-eyes --final-test` (once).
