@@ -37,12 +37,25 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   diagnostics), best.pt, val/test_predictions.csv and test_results.json; it refuses a folder that already holds
   results unless `--overwrite`. Architecture switches (defaults = exp1-exp6 behavior, checked bit-for-bit):
   `--depth 18|34`, `--pool avg|gem`, `--dropout` (0.2); the architecture is saved in best.pt as `arch`.
+  `--accum N` (gradient accumulation): each batch goes through the GPU in N pieces, same recipe with less GPU
+  memory (BatchNorm statistics per piece); `--accum 1` (default) is bit-identical to the old loop (checked on CPU).
+  `--extra-labels CSV --extra-images DIR`: more labeled photos added to the TRAINING split only (validation/test
+  eyes unchanged, so runs stay paired); refuses any validation/test patient and a folder preprocessed differently
+  (preprocess.json); mean/std and background stay measured on the original training photos; recorded in config.json
+  (`extra`) and `extra_split.csv`. Without the flags, training is bit-identical to before (checked on CPU).
 - `pretrain.py` (Stage 2): SimMIM-style masked image modeling, written from scratch, for the SAME network as
   Stage 1: hide 60% of the image in 32x32 squares (learned mask color), the ResNet stem+stages encode, a 1x1 conv
   + PixelShuffle redraws the pixels, L1 loss on hidden pixels only. Leaves out every image of the labeled
   validation/test patients (`--exclude-labels`, same `--split-seed` as train.py). Saves `encoder.pt` and
   `last.pt` every epoch (`--resume`), reconstruction pictures every `--example-every` epochs. `train.py --init
   <encoder.pt>` starts disease training from it (same `--depth`/`--pool` required; recorded in config.json).
+- `tta.py`: test-time augmentation for a finished run: scores each eye in the 8 exact orientations of a square
+  (flips, 90/180/270 turns) and averages. Writes a run-like folder (`<run>_tta`) that analyze.py reads unchanged.
+  Validation first (new 90%-sensitivity cutoff chosen there); `--split test` only once, after deciding; refuses
+  to redo either. Its self-check: view 1 reproduces the run's own val AUC.
+- `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
+  of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
+  labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -118,8 +131,8 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). Still open: a val-only
-  re-scorer so exp2's best.pt can be paired with later runs, TTA. Noise check done (exp7b): seed-to-seed
+- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). TTA (`tta.py`) done. Still open: a
+  val-only re-scorer so exp2's best.pt can be paired with later runs. Noise check done (exp7b): seed-to-seed
   difference 0.0001 on one pair; working `--noise-floor 0.007`.
 
 ## Experiments
@@ -138,6 +151,9 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp7b | exp7 repeated with `--seed 43` (noise check: same recipe, same split, different random init/order) | 0.888 | (not recorded) | Paired vs exp7: -0.0001, 95% range -0.007 to +0.006: the recipe reproduces almost exactly. One seed pair is a single sample, so use a cautious working noise floor of ~0.005-0.01 rather than 0.0001. With it, exp7 vs exp6 (+0.016) passes both checks: the tight mask is a confirmed improvement. |
 | exp8 | as exp7 but `--pool gem` | **0.896** (50) | 0.889 / 91.8% / 60.8% | Paired vs exp7: +0.008, 95% range +0.001 to +0.015, better in 99% of resamples; above the 0.007 noise floor, so it passes both checks, narrowly. Learned much faster early (0.737 at epoch 2 vs 0.685; grade means separated by epoch 4); same healthy ending (plateau from ~43, train AUC 0.912 vs val 0.895, val loss lowest at the end). Steady 2.3 min/epoch with fans at max. New base recipe: 512 px, tight mask, 60 epochs, GeM. |
 | exp9 | as exp8 but `--depth 34` (ResNet-34, 21.3M weights) | 0.896 (50) | 0.888 / 89.9% / 63.8% | A tie with exp8 (-0.0002 val AUC), with the same train-val gap (0.911 vs 0.895) and ~60% slower epochs (~3.7 vs ~2.3 min). Model size is not the limit at this data size; ResNet-18 stays. Its val specificity at 90% sensitivity ran a little higher (0.645 vs 0.618 at epoch 50), but at the same AUC that is noise in the operating point, not a better model. |
+| exp10 | as exp8 but `--init runs\pre1\encoder.pt` (Stage 2a: SimMIM-pretrained start, 50 epochs on ~78k unlabeled photos) | **0.905** (50) | 0.903 / 90.3% / 65.2% | Paired vs exp8: +0.0086, 95% range +0.002 to +0.016, better in 99% of resamples, above the 0.007 noise floor: passes both checks, so self-supervised pretraining is a confirmed improvement (spec at 90% sens 61.8% -> 66.0%). Clear head start: 0.765 at epoch 1, 0.783 at epoch 2 (exp8: 0.737), 0.890 at epoch 29-30; plateau from ~41 (0.902-0.905). Train-val gap wider than exp8 (train AUC 0.934 vs val 0.903, exp8 0.912 vs 0.895), but val loss lowest near the end (0.2076 at 50) and flat after, so no harmful overfitting. Grade means swing epoch to epoch early (score offset shifts; ranking stable). Same speed as exp8 (~2.25 min/epoch). |
+| exp11 | as exp10 but 768 px (`processed_768_enhanced_tight`, `--size 768`, `--init runs\pre1\encoder.pt`, batch 32, no `--accum`) | 0.909 (50) | 0.907 / 91.6% / 62.5% | Paired vs exp10: +0.0044, 95% range -0.002 to +0.011, better in 92% of resamples: fails both checks, a TIE. Spec at 90% sens lower (62.9% vs 66.0%). 768 px is not worth ~2.9x the compute; 512 px stays. TTA on exp11: 0.9090 -> 0.9140 (+0.0049), a 4th model where TTA helps. Same curve shape as exp10 (0.774 at epoch 1, 0.896 at 30, plateau 0.906-0.909 from ~44; train AUC 0.936 vs val 0.907). ~2.9x slower, not 2.25x: 67 img/s, 6.5 min/epoch (~6.6 h), some epochs 45-57 img/s with data waits of 13-17% (laptop busy/hot). |
+| exp12 | as exp10 but `--extra-labels testLabels15.csv --extra-images processed_512_enhanced_tight_unlabeled` (+53,576 labeled EyePACS 2015 test photos, training only: 78,166 training photos, 3.2x) | **0.924** (48) | 0.916 / 89.3% / 73.1% | Paired vs exp10: +0.0195, 95% range +0.011 to +0.028, better in 100% of resamples, above the 0.007 floor: passes both checks, the biggest single-run gain since 60 epochs. More labeled data is the new base recipe. TTA: 0.9242 -> 0.9293 (+0.0052, a 5th model where TTA helps). Spec at 90% sens 73.1% vs 66.0%. Faster and higher all the way: 0.826 at epoch 1 (exp10 0.765), 0.901 by epoch 16 (exp10 needed ~40), plateau 0.920-0.924 from ~42. Val loss lowest 0.1896 at 48 (exp10 0.2076). Train-val gap 0.949 vs 0.923 (exp10 0.934 vs 0.903): slightly smaller, despite 3x more weight updates. No-skill 0.3389 (extra photos' grade mix). ~6.9 min/epoch at 193 img/s (~7 h). |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
@@ -182,6 +198,122 @@ Validation to test dropped only 0.005 AUC and specificity held, so the choices g
 From exp1: test AUC 0.638 -> 0.915; healthy eyes cleared at ~90% sensitivity 23% -> 72%. This is the benchmark
 Stage 2 must beat. Not yet known: performance on other hospitals' photos (Stage 4).
 
+## Stage 2a decision (made on validation, before touching test)
+
+Candidates fixed in advance (two only, to limit optimism from trying many combinations on validation), with the rule
+"if B is within ~0.003 of A, take A: one model is simpler and twice as fast":
+- A: exp10 + `--both-eyes`: val AUC **0.924**, spec 73.1% at 90% sens (w = 0.40, flat peak 0.35-0.50 at 0.923-0.924).
+- B: exp10 + exp9 `--ensemble --both-eyes`: val AUC 0.926, spec 74.0% (w = 0.40). +0.0018 over A: under the margin.
+DECISION: the Stage 2a system is **A**: exp10 alone (pretrained ResNet-18 + GeM), each eye's score blended with its
+fellow eye's (w = 0.40), cutoff for 90% sensitivity, all chosen on validation. It beats the frozen Stage 1 system on
+validation (0.924 vs 0.920, spec 73.1% vs 71.6%) with one model instead of two. Official test result: one run of
+`python analyze.py runs\exp10 --both-eyes --final-test` (recorded below, not used to choose anything).
+
+TTA on exp10 (`tta.py`, 8 orientations, validation only; plain view reproduced 0.9047 exactly): 0.9115, paired vs
+exp10 +0.0069, 95% range +0.004 to +0.010, better in 100% of resamples (check 1 passed). Check 2 (training luck) does
+not apply: TTA reuses the SAME weights, so no seed noise enters the difference. Repeated on two other models
+(plain views again reproduced their runs exactly): exp8 0.8961 -> 0.9014 (+0.0053, spec 61.8% -> 65.9%), exp9
+0.8959 -> 0.9033 (+0.0074, spec 67.1%). Three models, three gains of +0.005 to +0.007: TTA is a confirmed,
+general improvement and joins the standard tricks (tta.py, then --both-eyes). With `--both-eyes`: **0.929** (w = 0.40), spec 75.1% (vs 0.924 / 73.1%).
+Not test-evaluated: bundle with the 768 px run (exp11) into one next system and one test pass, rather than spending
+a test evaluation on each small trick.
+
+## Stage 2a v2 decision (made on validation, before touching test)
+
+Candidates fixed in advance (after the TTA check, before exp11 finished), same "within ~0.003, take the simpler" rule:
+- C1: exp10 + TTA + `--both-eyes`: val AUC **0.929**, spec 75.1% (w = 0.40).
+- C2: exp11 (768 px) + TTA + `--both-eyes`, ONLY if exp11 first passed the paired check vs exp10. It did not (tie), so
+  C2 is out; its TTA-only val AUC (0.914 vs exp10's 0.9115, +0.0025) would not have cleared the margin either.
+DECISION: the Stage 2a v2 system is **C1**: exp10 (512 px, pretrained ResNet-18 + GeM), each eye scored in the 8
+orientations and averaged (tta.py), then blended with the fellow eye (w = 0.40), cutoff for 90% sensitivity, all
+chosen on validation. Official test result: one run of `python tta.py --run runs\exp10 --images
+...\processed_512_enhanced_tight --split test`, then `python analyze.py runs\exp10_tta --both-eyes --final-test`. Recorded below.
+
+## Stage 2a v2 result (frozen)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| System (test, each touched once) | AUC | Sensitivity | Specificity | Models x views |
+|---|---|---|---|---|
+| Stage 1: exp8 + exp9, both eyes | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 2 x 1 |
+| Stage 2a: exp10, both eyes | 0.921 [0.907-0.934] | 89.9% [87.6-92.2%] | 71.9% [70.0-73.7%] | 1 x 1 |
+| Stage 2a v2 validation (choices made here) | 0.929 | 90.0% | 75.1% | 1 x 8 |
+| **Stage 2a v2: exp10 + TTA, both eyes** | **0.925** [0.912-0.937] | **90.3%** [88.1-92.5%] | **73.5%** [71.6-75.3%] | **1 x 8** |
+
+Validation to test dropped 0.004 AUC, as in the earlier systems: the choices generalize within EyePACS. Versus
+Stage 2a on test: +0.004 AUC and +1.6 points of specificity at the same ~90% sensitivity (about 16 more healthy eyes
+cleared per 1,000). The test ranges overlap, so the proof that TTA helps is the validation evidence (4 models,
++0.005 to +0.007 each), not this single test comparison. Cost: 8 forward passes per photo (still one model, ~0.1 s
+per eye on the laptop GPU). This is the benchmark for the next improvement (more labeled data).
+
+
+## Stage 2a result (frozen)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| | AUC | Sensitivity | Specificity | Models |
+|---|---|---|---|---|
+| Stage 1 frozen (exp8 + exp9, both eyes), test | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 2 |
+| Stage 2a validation (choices made here) | 0.924 | 90.0% | 73.1% | 1 |
+| **Stage 2a test (official, touched once)** | **0.921** [0.907-0.934] | **89.9%** [87.6-92.2%] | **71.9%** [70.0-73.7%] | **1** |
+
+Validation to test dropped only 0.003 AUC, so the choices generalize within EyePACS. Versus Stage 1 on test: +0.006
+AUC, same sensitivity, specificity +0.2 points, with ONE model instead of two (half the compute per photo). The test
+ranges overlap, so on test alone this is "at least as good, simpler", not a proven gain; the proven gain is the paired
+validation check (exp10 vs exp8: +0.0086, both checks passed). This is the new benchmark for later stages.
+
+## Next: more labeled data (exp12)
+
+Evidence: size (exp9) and resolution (exp11) gave nothing, the train-val gap keeps growing (exp11: 0.936 vs 0.907),
+so the limit is the number of labeled photos. Source: `testLabels15.csv`, the published grades of the 53,576
+EyePACS 2015 test photos (from the Kaggle mirror c7934597/resized-2015-2019-diabetic-retinopathy-detection,
+`labels/`; keep it in `retina-data\data`, never in the repo). Checked: 53,576 unique `N_left/N_right` names, both
+eyes for each of 26,788 patients, 0 patients shared with trainLabels.csv (so none with our val/test), grade mix
+73.8/7.0/14.7/2.3/2.3% vs train 73.5/7.0/15.1/2.5/2.0%. The same photos were used UNLABELED in pretraining (pre1).
+Authenticity check DONE (`check_labels.py`, exp10, 5,000 random photos, all 53,576 have a photo): AUC 0.9014 vs
+exp10's own val 0.9047; at its val cutoff sens 91.0% / spec 64.3% (val: 90.0 / 66.0); mean score by grade
+-1.32 / -0.68 / +1.66 / +3.86 / +5.15 (val: -1.34 / -0.99 / +1.64 / +4.04 / +5.03): genuine, same grading.
+(Also an independent check that exp10 generalizes: 0.901 on 5,000 eyes it never saw labeled, in line with its
+test AUC 0.903.) Plan: (1) done; (2) exp12 = exp10 recipe +
+`--extra-labels ...\testLabels15.csv --extra-images ...\processed_512_enhanced_tight_unlabeled` (~78k training
+photos, ~3x longer epochs); (3) paired vs exp10; (4) TTA + both eyes vs the frozen 0.929 (val) / 0.925 (test).
+
+## Next system decision: candidates (fixed after exp12 finished, BEFORE its TTA / both-eyes numbers)
+
+Precondition: exp12 must pass the paired check vs exp10 (`analyze.py runs\exp10 runs\exp12 --noise-floor 0.007`);
+otherwise C1 (the frozen Stage 2a v2 system) stays. Then, rule "within ~0.003, take the simpler":
+- D1: exp12 + TTA + `--both-eyes` (one model, like C1). Must beat C1's validation 0.929 to replace it.
+- D2: ensemble exp12_tta + exp10_tta + `--both-eyes` (two models). Taken only if >= 0.003 above D1.
+The winner gets one test pass (`tta.py --split test` for exp12, then `analyze.py ... --final-test`).
+
+Results (validation): exp12 passed the paired check (+0.0195). D1 = **0.944** (w = 0.40, flat peak 0.35-0.45 at
+0.944), spec 83.3% (vs C1 0.929 / 75.1%). D2 = 0.942, spec 81.6%: BELOW D1, so averaging in the weaker exp10 only
+dilutes exp12. Both-eyes added +0.015 on top of exp12 + TTA (vs +0.017 on exp10): still large, a little smaller.
+DECISION: the next system ("Stage 2 v3") is **D1**: exp12 (pretrained ResNet-18 + GeM, 512 px, trained on
+78k labeled photos) + 8-view TTA + fellow-eye blend (w = 0.40), cutoff for 90% sensitivity, all chosen on
+validation. Official test: `python tta.py --run runs\exp12 --images ...\processed_512_enhanced_tight --split
+test`, then `python analyze.py runs\exp12_tta --both-eyes --final-test` (once). Recorded below.
+
+## Stage 2 v3 result (frozen, current best)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| System (test, each touched once) | AUC | Sensitivity | Specificity | Training labels |
+|---|---|---|---|---|
+| Stage 1: exp8 + exp9, both eyes | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 25k |
+| Stage 2a v2: exp10 + TTA, both eyes | 0.925 [0.912-0.937] | 90.3% [88.1-92.5%] | 73.5% [71.6-75.3%] | 25k |
+| Stage 2 v3 validation (choices made here) | 0.944 | 90.0% | 83.3% | 78k |
+| **Stage 2 v3: exp12 + TTA, both eyes** | **0.936** [0.923-0.947] | **88.0%** [85.5-90.5%] | **83.3%** [81.7-84.7%] | **78k** |
+
+AUC (threshold-free): +0.011 over Stage 2a v2, the largest system-level gain since Stage 1. Validation to test dropped
+0.008 AUC, more than the earlier 0.003-0.005 (expected somewhat: the bigger the validation gain, the more of it can be
+selection luck). The operating point moved: the cutoff chosen on validation for 90% sensitivity caught 88.0% of sick
+test eyes (range 85.5-90.5%, so 90% is inside it) and cleared 83.3% of healthy ones. Part of the specificity jump
+(+9.8 points) is that trade-off, so judge the gain by AUC, not by specificity alone. Open question, to settle on
+VALIDATION and external data (Stage 4), never by retuning on this test set: a cutoff chosen for exactly 90% on 5,268
+validation eyes lands ~2-3 points either side on new eyes; a screening program that needs >= 90% would pick a more
+cautious cutoff (e.g. one that keeps 90% at the low end of a validation bootstrap).
+
 ## Working with me
 
 I'm learning ML through this project. Explain what you change and why, keep code well commented,
@@ -199,7 +331,9 @@ and don't swap my hand-written components for library versions without asking.
    0.915. pre1 done (laptop, GPU): 50 epochs, 8.0 min/epoch (162 img/s, ~6.7 h); masked-pixel L1 loss
    0.495 -> 0.401 (epoch 2) -> 0.356 (5) -> 0.339 (10) -> 0.320 (30) -> 0.309 (50), still easing down at the end
    (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
-   visible (check `nvidia-smi`, power mode, restart); stop at once. Next: fine-tune exp10 with `--init`.
+   visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result"); with TTA too
+   (Stage 2a v2): TEST 0.925 / 90.3% / 73.5%. With 3x the labeled photos (exp12, Stage 2 v3): TEST 0.936 / 88.0% /
+   83.3%, the current best.
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not

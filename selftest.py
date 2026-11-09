@@ -25,6 +25,7 @@ It prints PASS or FAIL for each check and exits with an error if anything failed
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -182,6 +183,34 @@ def test_end_to_end(tmp):
     check("analyze.py: ensemble + both eyes, chosen on validation, applied to test once",
           code4 == 0 and "chosen w =" in log4 and "TEST SET, evaluated once" in log4)
 
+    # TTA: the 8 orientations are 8 different exact pixel shuffles; view 1 reproduces the run;
+    # validation must come first and the test eyes can be scored only once.
+    sys.path.insert(0, HERE)
+    from tta import eight_views
+    x = torch.arange(2 * 3 * 4 * 4, dtype=torch.float32).reshape(2, 3, 4, 4)
+    views = eight_views(x)
+    check("tta: 8 distinct orientations that only move pixels",
+          len({tuple(v.flatten().tolist()) for v in views}) == 8
+          and all(torch.equal(v.flatten().sort().values, x.flatten().sort().values) for v in views))
+    tta_out = os.path.join(tmp, "run_ordinal_tta")
+    tta_args = ["tta.py", "--run", run_o, "--images", processed, "--workers", "0", "--out", tta_out]
+    code_t0, log_t0 = run(tta_args + ["--split", "test"])
+    code_v, log_v = run(tta_args)
+    plain_ok = False
+    if code_v == 0:
+        info = json.load(open(os.path.join(tta_out, "tta.json")))
+        ckpt_o = torch.load(os.path.join(run_o, "best.pt"), map_location="cpu", weights_only=True)
+        plain_ok = abs(info["val_auc_plain"] - ckpt_o["val_auc"]) < 1e-9
+    code_t, log_t = run(tta_args + ["--split", "test"])
+    code_t2, log_t2 = run(tta_args + ["--split", "test"])
+    code_v2, log_v2 = run(tta_args)
+    code_a, log_a = run(["analyze.py", tta_out, "--both-eyes", "--final-test", "--n-boot", "50"])
+    check("tta: view 1 reproduces the run's validation AUC", plain_ok)
+    check("tta: validation first, test once, then validation is frozen",
+          code_t0 != 0 and code_v == 0 and code_t == 0 and code_t2 != 0 and code_v2 != 0)
+    check("tta: analyze.py reads its output (both eyes + final test)",
+          code_a == 0 and "TEST SET, evaluated once" in log_a)
+
     # Stage 2: pretraining leaves out validation/test patients, and train.py --init uses its encoder.
     pre = os.path.join(tmp, "pre")
     code, log = run(["pretrain.py", "--images", processed, "--exclude-labels", labels, "--size", "96",
@@ -207,6 +236,67 @@ def test_end_to_end(tmp):
             m.load_state_dict(enc, strict=False)
             loaded = json.load(open(os.path.join(out, "config.json")))["init"] is not None
         check("train.py --init starts from the pretrained encoder and records it", code == 0 and loaded)
+
+    # Gradient accumulation: --accum 2 runs (pieces of 4 images) and is recorded.
+    out = os.path.join(tmp, "run_accum")
+    code, log = run(["train.py", "--labels", labels, "--images", processed, "--size", "96", "--epochs", "1",
+                     "--batch", "8", "--accum", "2", "--workers", "0", "--out", out])
+    check("train.py --accum 2 runs and records it",
+          code == 0 and json.load(open(os.path.join(out, "config.json")))["accum"] == 2)
+
+    # Extra labeled photos (training only) and the labels authenticity check. A second synthetic
+    # set gets new patient numbers (+100000), like the EyePACS test folder's own patients.
+    data2 = os.path.join(tmp, "synthetic2")
+    run(["make_synthetic_data.py", "--out", data2, "--patients", "30", "--seed", "1"])
+    p2 = os.path.join(data2, "processed_96")
+    run(["preprocess.py", "--src", os.path.join(data2, "raw"), "--dst", p2, "--size", "96", "--workers", "2"])
+    renamed = os.path.join(data2, "renamed")
+    os.makedirs(renamed)
+    shutil.copy(os.path.join(p2, "preprocess.json"), renamed)
+    new_name = lambda n: f"{int(n.split('_')[0]) + 100000}_{n.split('_')[1]}"
+    lab2 = pd.read_csv(os.path.join(data2, "trainLabels.csv"))
+    for n in lab2["image"]:
+        if os.path.exists(os.path.join(p2, f"{n}.jpg")):
+            shutil.copy(os.path.join(p2, f"{n}.jpg"), os.path.join(renamed, f"{new_name(n)}.jpg"))
+    extra_csv = os.path.join(data2, "extra.csv")
+    lab2.assign(image=lab2["image"].map(new_name)).to_csv(extra_csv, index=False)
+    _, val_p, _ = split_by_patient(load_labels(labels), seed=42)
+    bad_csv = os.path.join(data2, "extra_bad.csv")
+    pd.concat([pd.read_csv(extra_csv), val_p[["image", "level"]].head(1)]).to_csv(bad_csv, index=False)
+    base = ["train.py", "--labels", labels, "--images", processed, "--size", "96", "--epochs", "1",
+            "--batch", "8", "--workers", "0"]
+    out = os.path.join(tmp, "run_extra")
+    # 2 epochs here: check_labels.py below needs a model that has learned something.
+    code, log = run([a if a != "1" else "2" for a in base] + ["--extra-labels", extra_csv,
+                                                              "--extra-images", renamed, "--out", out])
+    same_val = code == 0 and pd.read_csv(os.path.join(out, "val_predictions.csv"))["image"].tolist() == \
+        pd.read_csv(os.path.join(run_o, "val_predictions.csv"))["image"].tolist()
+    extra_rec = json.load(open(os.path.join(out, "config.json")))["extra"] if code == 0 else None
+    check("train.py --extra-labels: extra photos join training only, validation eyes unchanged",
+          same_val and "extra:" in log and extra_rec and extra_rec["n_images"] > 50)
+    code_b, log_b = run(base + ["--extra-labels", bad_csv, "--extra-images", renamed,
+                                "--out", os.path.join(tmp, "run_extra_bad")])
+    with open(os.path.join(renamed, "preprocess.json")) as f:
+        recipe = json.load(f)
+    with open(os.path.join(renamed, "preprocess.json"), "w") as f:
+        json.dump(dict(recipe, size=128), f)
+    code_m, log_m = run(base + ["--extra-labels", extra_csv, "--extra-images", renamed,
+                                "--out", os.path.join(tmp, "run_extra_mismatch")])
+    with open(os.path.join(renamed, "preprocess.json"), "w") as f:
+        json.dump(recipe, f)
+    check("train.py --extra-labels refuses validation/test patients and differently preprocessed photos",
+          code_b != 0 and "validation/test patients" in log_b and code_m != 0 and "preprocessed differently" in log_m)
+    shuffled_csv = os.path.join(data2, "extra_shuffled.csv")
+    sh = pd.read_csv(extra_csv)
+    sh.assign(level=sh["level"].sample(frac=1, random_state=0).to_numpy()).to_csv(shuffled_csv, index=False)
+    chk = ["check_labels.py", "--run", out, "--images", renamed, "--workers", "0", "--labels"]
+    code_g, log_g = run(chk + [extra_csv])
+    code_s, log_s = run(chk + [shuffled_csv])
+    code_c, log_c = run(chk + [bad_csv])
+    auc_of = lambda log: float(log.split("AUC against the file's grades:")[1].split()[0])
+    check("check_labels.py: real grades score higher than shuffled ones; held-out patients refused",
+          code_g == 0 and code_s == 0 and auc_of(log_g) > auc_of(log_s)
+          and code_c != 0 and "validation/test patients" in log_c)
 
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")

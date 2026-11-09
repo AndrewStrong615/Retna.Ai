@@ -130,12 +130,14 @@ class FundusDataset(Dataset):
     def __init__(self, df, image_dir, transform):
         self.names = df["image"].tolist()
         self.grades = df["level"].tolist()
-        self.image_dir = image_dir
+        # Usually every image is in image_dir. A table with an "image_dir" column
+        # (train.py --extra-images) says per row which folder holds that image.
+        self.dirs = df["image_dir"].tolist() if "image_dir" in df else [image_dir] * len(self.names)
         self.transform = transform
 
     def __len__(self):
         return len(self.names)
 
     def __getitem__(self, i):
-        img = Image.open(f"{self.image_dir}/{self.names[i]}.jpg").convert("RGB")
+        img = Image.open(f"{self.dirs[i]}/{self.names[i]}.jpg").convert("RGB")
         return self.transform(img), torch.tensor(self.grades[i], dtype=torch.long)

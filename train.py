@@ -30,6 +30,7 @@ import subprocess
 import time
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -303,6 +304,10 @@ def main():
     p.add_argument("--size", type=int, default=384)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch", type=int, default=32)
+    p.add_argument("--accum", type=int, default=1,
+                   help="split each batch into this many pieces that go through the GPU one after "
+                        "another (gradient accumulation): same recipe, less GPU memory. "
+                        "Use 2 if 768 px runs out of memory")
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--wd", type=float, default=0.05)
     p.add_argument("--workers", type=int, default=None,
@@ -331,12 +336,19 @@ def main():
                    help="GPU only: alternative memory layout (slower on the RTX 5060; see bench.py)")
     p.add_argument("--cudnn-benchmark", type=int, choices=[0, 1], default=1,
                    help="GPU only: let cuDNN time its algorithms once and keep the fastest")
+    p.add_argument("--extra-labels", default=None,
+                   help="CSV (image,level) of more labeled photos, added to the TRAINING split only, "
+                        "e.g. testLabels15.csv (the published grades of the EyePACS test folder)")
+    p.add_argument("--extra-images", default=None,
+                   help="folder with the --extra-labels photos, preprocessed exactly like --images")
     p.add_argument("--limit", type=int, default=0, help="use only about N images, for quick tests")
     p.add_argument("--split-seed", type=int, default=42,
                    help="which patients go to train/val/test (keep 42 to compare runs)")
     p.add_argument("--seed", type=int, default=42,
                    help="weight initialization, shuffling and augmentation")
     args = p.parse_args()
+    if args.accum < 1 or args.batch % args.accum:
+        raise SystemExit(f"--batch {args.batch} must split evenly into --accum {args.accum} pieces.")
 
     # Never mix two runs' files in one folder: a leftover test_results.json or
     # best.pt from an earlier run could be mistaken for this run's.
@@ -389,17 +401,70 @@ def main():
           f" ({'enhanced' if enhanced else 'plain'} preprocessing)")
     train_tf, eval_tf = make_transforms(args.size, mean, std, fill, args.rotate_interp)
 
-    def loader(part, tf, n_workers, shuffle=False, keep_workers=False):
+    # ---------------- Extra labeled photos (training only) ----------------
+    # More labeled photos from another source, e.g. the published grades of the
+    # EyePACS 2015 test folder (testLabels15.csv). They are added to the TRAINING
+    # split only: validation and test stay exactly the same patients and eyes, so
+    # a run with extra data can be compared paired with a run without it.
+    # The normalization (mean/std) and background color above were measured on the
+    # original training photos only, so they too stay identical to earlier runs.
+    extra_info = None
+    if args.extra_labels:
+        if not args.extra_images:
+            raise SystemExit("--extra-labels needs --extra-images (the folder with those photos).")
+        extra = load_labels(args.extra_labels, referable_from=REFERABLE_FROM)[["image", "level", "label", "patient"]]
+        # Rule: a validation or test patient must never be seen in training, not
+        # even through another dataset's copy of their photos.
+        # (Recomputed from the full label table, so eyes skipped for a missing image or by
+        # --limit still count as held out.)
+        _, val_all, test_all = split_by_patient(df, seed=args.split_seed)
+        held_out = set(val_all["patient"]) | set(test_all["patient"])
+        clash = sorted(set(extra["patient"]) & held_out)
+        if clash:
+            raise SystemExit(f"{len(clash)} patients in {args.extra_labels} are validation/test patients "
+                             f"(e.g. {clash[:5]}). Extra photos may only add NEW patients to training.")
+        overlap_train = len(set(extra["patient"]) & set(train_df["patient"]))
+        # Both folders must have been made the same way, or the model would see two kinds of photo.
+        def recipe(folder):
+            path = os.path.join(folder, "preprocess.json")
+            if not os.path.exists(path):
+                return None
+            with open(path) as f:
+                info = json.load(f)
+            return {k: info.get(k) for k in ("size", "enhance", "tight_mask", "mask_margin")}
+        if recipe(args.images) and recipe(args.extra_images) and recipe(args.images) != recipe(args.extra_images):
+            raise SystemExit(f"The two image folders were preprocessed differently: {recipe(args.images)} vs "
+                             f"{recipe(args.extra_images)}. Preprocess the extra photos the same way.")
+        exists = extra["image"].map(lambda n: os.path.exists(f"{args.extra_images}/{n}.jpg"))
+        extra_missing = int((~exists).sum())
+        extra = extra[exists]
+        if args.limit:
+            extra = extra.sample(frac=min(1.0, args.limit / len(df)), random_state=args.split_seed)
+        extra = extra.assign(image_dir=args.extra_images)
+        extra.to_csv(f"{args.out}/extra_split.csv", index=False)
+        train_df = pd.concat([train_df.assign(image_dir=args.images), extra], ignore_index=True)
+        extra_info = {"labels": os.path.abspath(args.extra_labels), "images": os.path.abspath(args.extra_images),
+                      "n_images": len(extra), "missing_images": extra_missing,
+                      "patients_also_in_train": overlap_train,
+                      "grade_counts": extra["level"].value_counts().sort_index().to_dict()}
+        print(f"extra: {len(extra):6d} images, {extra['label'].mean():.1%} referable (training only; "
+              f"{extra_missing} labels had no image) -> train now {len(train_df)} images")
+
+    def loader(part, tf, n_workers, shuffle=False, keep_workers=False, batch=args.batch):
         # persistent_workers keeps the helper processes alive between epochs.
         # Starting them is slow on Windows (each one loads PyTorch again), so
         # without it every epoch would begin with a long pause.
-        return DataLoader(FundusDataset(part, args.images, tf), batch_size=args.batch,
-                          shuffle=shuffle, drop_last=shuffle and len(part) > args.batch,
+        return DataLoader(FundusDataset(part, args.images, tf), batch_size=batch,
+                          shuffle=shuffle, drop_last=shuffle and len(part) > batch,
                           num_workers=n_workers, pin_memory=use_amp,
                           persistent_workers=keep_workers and n_workers > 0)
 
     eval_workers = max(1, workers // 2) if workers else 0
-    train_loader = loader(train_df, train_tf, workers, shuffle=True, keep_workers=True)
+    # With --accum N the training loader hands out pieces of batch/N images; N pieces
+    # together make one batch (see the training loop). Evaluation needs no gradients,
+    # so it uses far less memory and keeps whole batches.
+    train_loader = loader(train_df, train_tf, workers, shuffle=True, keep_workers=True,
+                          batch=args.batch // args.accum)
     val_loader = loader(val_df, eval_tf, eval_workers, keep_workers=True)
     # (the test loader is only created at the very end, for the single test pass)
 
@@ -442,7 +507,8 @@ def main():
                   n_images={k: len(v) for k, v in parts.items()}, missing_images=missing,
                   grade_counts={k: v["level"].value_counts().sort_index().to_dict()
                                 for k, v in parts.items()},
-                  sanity_run=bool(args.limit), preprocess=preprocess_info, init=init_info)
+                  sanity_run=bool(args.limit), preprocess=preprocess_info, init=init_info,
+                  extra=extra_info)
     write_json(f"{args.out}/config.json", config)
 
     # Weight decay gently pulls weights toward zero, which reduces overfitting.
@@ -456,8 +522,10 @@ def main():
 
     # Learning rate schedule: ramp up gently at the start (random weights are
     # fragile), then smoothly decrease so the model settles into a good solution.
-    total_steps = args.epochs * max(len(train_loader), 1)
-    warmup = max(1, min(len(train_loader), total_steps // 5))
+    # One "step" = one weight update = one batch (with --accum, N pieces).
+    steps_per_epoch = math.ceil(len(train_loader) / args.accum)
+    total_steps = args.epochs * max(steps_per_epoch, 1)
+    warmup = max(1, min(steps_per_epoch, total_steps // 5))
 
     def lr_factor(step):
         if step < warmup:
@@ -477,20 +545,29 @@ def main():
         running, seen, skipped, waited = 0.0, 0, 0, 0.0
         train_scores, train_grades_seen = [], []
         t_ready = time.time()
-        for x, g in train_loader:
+        for i, (x, g) in enumerate(train_loader):
             waited += time.time() - t_ready             # time spent waiting for the next batch
             x = x.to(device, non_blocking=True, memory_format=memory_format)
             g = g.to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
                 s = model(x)                               # 1. forward: make predictions
             loss = loss_fn(s.float(), g)                   # 2. measure how wrong they are
-            optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()                  # 3. backward: compute gradients
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(params, 1.0)          # stop rare huge updates
-            scaler.step(optimizer)                         # 4. nudge every weight downhill
-            scaler.update()
-            scheduler.step()
+            # Gradient accumulation (--accum N): backward() ADDS to the stored gradients,
+            # so N pieces, each with its loss divided by N, leave the same gradient as one
+            # big batch, using only one piece's worth of GPU memory. (The one difference:
+            # BatchNorm computes its statistics per piece.) With N = 1 every piece is a
+            # whole batch and this is exactly the plain one-batch-one-step loop.
+            first_piece = i % args.accum == 0
+            last_piece = (i + 1) % args.accum == 0 or i + 1 == len(train_loader)
+            if first_piece:
+                optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss / args.accum if args.accum > 1 else loss).backward()  # 3. gradients
+            if last_piece:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(params, 1.0)      # stop rare huge updates
+                scaler.step(optimizer)                     # 4. nudge every weight downhill
+                scaler.update()
+                scheduler.step()
             # .item() waits for the GPU to finish this step. That also keeps the
             # "waiting for data" timer honest; if you ever remove it, put
             # torch.cuda.synchronize() here instead.
