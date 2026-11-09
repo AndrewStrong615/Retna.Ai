@@ -153,6 +153,7 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp9 | as exp8 but `--depth 34` (ResNet-34, 21.3M weights) | 0.896 (50) | 0.888 / 89.9% / 63.8% | A tie with exp8 (-0.0002 val AUC), with the same train-val gap (0.911 vs 0.895) and ~60% slower epochs (~3.7 vs ~2.3 min). Model size is not the limit at this data size; ResNet-18 stays. Its val specificity at 90% sensitivity ran a little higher (0.645 vs 0.618 at epoch 50), but at the same AUC that is noise in the operating point, not a better model. |
 | exp10 | as exp8 but `--init runs\pre1\encoder.pt` (Stage 2a: SimMIM-pretrained start, 50 epochs on ~78k unlabeled photos) | **0.905** (50) | 0.903 / 90.3% / 65.2% | Paired vs exp8: +0.0086, 95% range +0.002 to +0.016, better in 99% of resamples, above the 0.007 noise floor: passes both checks, so self-supervised pretraining is a confirmed improvement (spec at 90% sens 61.8% -> 66.0%). Clear head start: 0.765 at epoch 1, 0.783 at epoch 2 (exp8: 0.737), 0.890 at epoch 29-30; plateau from ~41 (0.902-0.905). Train-val gap wider than exp8 (train AUC 0.934 vs val 0.903, exp8 0.912 vs 0.895), but val loss lowest near the end (0.2076 at 50) and flat after, so no harmful overfitting. Grade means swing epoch to epoch early (score offset shifts; ranking stable). Same speed as exp8 (~2.25 min/epoch). |
 | exp11 | as exp10 but 768 px (`processed_768_enhanced_tight`, `--size 768`, `--init runs\pre1\encoder.pt`, batch 32, no `--accum`) | 0.909 (50) | 0.907 / 91.6% / 62.5% | Paired vs exp10: +0.0044, 95% range -0.002 to +0.011, better in 92% of resamples: fails both checks, a TIE. Spec at 90% sens lower (62.9% vs 66.0%). 768 px is not worth ~2.9x the compute; 512 px stays. TTA on exp11: 0.9090 -> 0.9140 (+0.0049), a 4th model where TTA helps. Same curve shape as exp10 (0.774 at epoch 1, 0.896 at 30, plateau 0.906-0.909 from ~44; train AUC 0.936 vs val 0.907). ~2.9x slower, not 2.25x: 67 img/s, 6.5 min/epoch (~6.6 h), some epochs 45-57 img/s with data waits of 13-17% (laptop busy/hot). |
+| exp12 | as exp10 but `--extra-labels testLabels15.csv --extra-images processed_512_enhanced_tight_unlabeled` (+53,576 labeled EyePACS 2015 test photos, training only: 78,166 training photos, 3.2x) | **0.924** (48) | 0.916 / 89.3% / 73.1% | Raw +0.0195 val AUC over exp10, the biggest single-run gain since 60 epochs; paired check pending. Spec at 90% sens 73.1% vs 66.0%. Faster and higher all the way: 0.826 at epoch 1 (exp10 0.765), 0.901 by epoch 16 (exp10 needed ~40), plateau 0.920-0.924 from ~42. Val loss lowest 0.1896 at 48 (exp10 0.2076). Train-val gap 0.949 vs 0.923 (exp10 0.934 vs 0.903): slightly smaller, despite 3x more weight updates. No-skill 0.3389 (extra photos' grade mix). ~6.9 min/epoch at 193 img/s (~7 h). |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
@@ -276,6 +277,14 @@ exp10's own val 0.9047; at its val cutoff sens 91.0% / spec 64.3% (val: 90.0 / 6
 test AUC 0.903.) Plan: (1) done; (2) exp12 = exp10 recipe +
 `--extra-labels ...\testLabels15.csv --extra-images ...\processed_512_enhanced_tight_unlabeled` (~78k training
 photos, ~3x longer epochs); (3) paired vs exp10; (4) TTA + both eyes vs the frozen 0.929 (val) / 0.925 (test).
+
+## Next system decision: candidates (fixed after exp12 finished, BEFORE its TTA / both-eyes numbers)
+
+Precondition: exp12 must pass the paired check vs exp10 (`analyze.py runs\exp10 runs\exp12 --noise-floor 0.007`);
+otherwise C1 (the frozen Stage 2a v2 system) stays. Then, rule "within ~0.003, take the simpler":
+- D1: exp12 + TTA + `--both-eyes` (one model, like C1). Must beat C1's validation 0.929 to replace it.
+- D2: ensemble exp12_tta + exp10_tta + `--both-eyes` (two models). Taken only if >= 0.003 above D1.
+The winner gets one test pass (`tta.py --split test` for exp12, then `analyze.py ... --final-test`).
 
 ## Working with me
 
