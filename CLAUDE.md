@@ -229,7 +229,7 @@ orientations and averaged (tta.py), then blended with the fellow eye (w = 0.40),
 chosen on validation. Official test result: one run of `python tta.py --run runs\exp10 --images
 ...\processed_512_enhanced_tight --split test`, then `python analyze.py runs\exp10_tta --both-eyes --final-test`. Recorded below.
 
-## Stage 2a v2 result (frozen, current best)
+## Stage 2a v2 result (frozen)
 
 Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
 
@@ -292,7 +292,27 @@ dilutes exp12. Both-eyes added +0.015 on top of exp12 + TTA (vs +0.017 on exp10)
 DECISION: the next system ("Stage 2 v3") is **D1**: exp12 (pretrained ResNet-18 + GeM, 512 px, trained on
 78k labeled photos) + 8-view TTA + fellow-eye blend (w = 0.40), cutoff for 90% sensitivity, all chosen on
 validation. Official test: `python tta.py --run runs\exp12 --images ...\processed_512_enhanced_tight --split
-test`, then `python analyze.py runs\exp12_tta --both-eyes --final-test` (once).
+test`, then `python analyze.py runs\exp12_tta --both-eyes --final-test` (once). Recorded below.
+
+## Stage 2 v3 result (frozen, current best)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| System (test, each touched once) | AUC | Sensitivity | Specificity | Training labels |
+|---|---|---|---|---|
+| Stage 1: exp8 + exp9, both eyes | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 25k |
+| Stage 2a v2: exp10 + TTA, both eyes | 0.925 [0.912-0.937] | 90.3% [88.1-92.5%] | 73.5% [71.6-75.3%] | 25k |
+| Stage 2 v3 validation (choices made here) | 0.944 | 90.0% | 83.3% | 78k |
+| **Stage 2 v3: exp12 + TTA, both eyes** | **0.936** [0.923-0.947] | **88.0%** [85.5-90.5%] | **83.3%** [81.7-84.7%] | **78k** |
+
+AUC (threshold-free): +0.011 over Stage 2a v2, the largest system-level gain since Stage 1. Validation to test dropped
+0.008 AUC, more than the earlier 0.003-0.005 (expected somewhat: the bigger the validation gain, the more of it can be
+selection luck). The operating point moved: the cutoff chosen on validation for 90% sensitivity caught 88.0% of sick
+test eyes (range 85.5-90.5%, so 90% is inside it) and cleared 83.3% of healthy ones. Part of the specificity jump
+(+9.8 points) is that trade-off, so judge the gain by AUC, not by specificity alone. Open question, to settle on
+VALIDATION and external data (Stage 4), never by retuning on this test set: a cutoff chosen for exactly 90% on 5,268
+validation eyes lands ~2-3 points either side on new eyes; a screening program that needs >= 90% would pick a more
+cautious cutoff (e.g. one that keeps 90% at the low end of a validation bootstrap).
 
 ## Working with me
 
@@ -312,7 +332,8 @@ and don't swap my hand-written components for library versions without asking.
    0.495 -> 0.401 (epoch 2) -> 0.356 (5) -> 0.339 (10) -> 0.320 (30) -> 0.309 (50), still easing down at the end
    (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
    visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result"); with TTA too
-   (Stage 2a v2): TEST 0.925 / 90.3% / 73.5%, the current best.
+   (Stage 2a v2): TEST 0.925 / 90.3% / 73.5%. With 3x the labeled photos (exp12, Stage 2 v3): TEST 0.936 / 88.0% /
+   83.3%, the current best.
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
