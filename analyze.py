@@ -199,11 +199,14 @@ def fellow_eye(df, score):
     return np.where(count == 2, total - s, s).astype(float)
 
 
-def tricks(runs, ensemble, both_eyes, final_test, target_sensitivity, n_boot, seed):
+def validation_choices(runs, ensemble, both_eyes, target_sensitivity, verbose=False):
     """
-    Everything is CHOSEN on validation: each model's score scale (for averaging),
-    the fellow-eye weight w, and the 90%-sensitivity cutoff. With --final-test the
-    same choices are then applied, once, to the test eyes.
+    Everything a "system" CHOOSES, chosen on validation only:
+      - each model's score scale (for averaging: its validation mean and spread),
+      - the fellow-eye weight w (the best on a grid, if both_eyes),
+      - the cutoff that refers target_sensitivity of the sick validation eyes.
+    Returned as a dict, so the same choices can be applied later to other eyes
+    (the test set in tricks() below, or an external dataset in external_test.py).
     """
     val = load_aligned(runs, "val")
     n = len(runs) if ensemble else 1
@@ -215,7 +218,7 @@ def tricks(runs, ensemble, both_eyes, final_test, target_sensitivity, n_boot, se
     def combine(table):
         return np.mean([(table[f"score_{i}"] - m) / sd for i, (m, sd) in enumerate(stats)], axis=0)
 
-    sick, single = val["sick"].to_numpy(), ((val["score_0"] - stats[0][0]) / stats[0][1]).to_numpy()
+    sick = val["sick"].to_numpy()
     combined = combine(val)
 
     # 2. Both eyes: score = (1 - w) * own + w * other eye; w chosen on validation.
@@ -225,10 +228,34 @@ def tricks(runs, ensemble, both_eyes, final_test, target_sensitivity, n_boot, se
         grid = np.round(np.arange(0, 0.55, 0.05), 2)
         aucs = [auc(sick, (1 - w) * combined + w * other) for w in grid]
         w_best = float(grid[int(np.argmax(aucs))])
-        print("Fellow-eye weight w, validation AUC for each (w = 0 means each eye alone):")
-        print("  " + "  ".join(f"{w:.2f}:{a:.4f}" for w, a in zip(grid, aucs)))
-        print(f"  chosen w = {w_best:.2f}  (picked on validation, so its validation AUC is a little optimistic)\n")
+        if verbose:
+            print("Fellow-eye weight w, validation AUC for each (w = 0 means each eye alone):")
+            print("  " + "  ".join(f"{w:.2f}:{a:.4f}" for w, a in zip(grid, aucs)))
+            print(f"  chosen w = {w_best:.2f}  (picked on validation, so its validation AUC is a little optimistic)\n")
         combined = (1 - w_best) * combined + w_best * other
+
+    return {"val": val, "n": n, "stats": stats, "combine": combine, "w": w_best,
+            "combined": combined, "cut": pick_cutoff(sick, combined, target_sensitivity)}
+
+
+def apply_choices(choices, table):
+    """The system's final score for the eyes in `table` (columns score_0, score_1, ...,
+    plus image/patient), using only choices made on validation."""
+    score = choices["combine"](table)
+    if choices["w"]:
+        score = (1 - choices["w"]) * score + choices["w"] * fellow_eye(table, score)
+    return score
+
+
+def tricks(runs, ensemble, both_eyes, final_test, target_sensitivity, n_boot, seed):
+    """
+    Everything is CHOSEN on validation: each model's score scale (for averaging),
+    the fellow-eye weight w, and the 90%-sensitivity cutoff. With --final-test the
+    same choices are then applied, once, to the test eyes.
+    """
+    choices = validation_choices(runs, ensemble, both_eyes, target_sensitivity, verbose=True)
+    val, n, stats, combined = choices["val"], choices["n"], choices["stats"], choices["combined"]
+    sick, single = val["sick"].to_numpy(), ((val["score_0"] - stats[0][0]) / stats[0][1]).to_numpy()
 
     name = " + ".join(["ensemble of " + ", ".join(runs) if n > 1 else runs[0]] +
                       (["both eyes"] if both_eyes else []))
@@ -236,7 +263,7 @@ def tricks(runs, ensemble, both_eyes, final_test, target_sensitivity, n_boot, se
     print(title + "\n" + "-" * len(title))
     diffs = np.array([auc(sick, combined, wt) - auc(sick, single, wt)
                       for wt in bootstrap_weights(val["patient"], n_boot, seed)])
-    cut = pick_cutoff(sick, combined, target_sensitivity)
+    cut = choices["cut"]
     sens, spec = sens_spec(sick, combined >= cut)
     s1, p1 = sens_spec(sick, single >= pick_cutoff(sick, single, target_sensitivity))
     print(f"  AUC {runs[0]} alone: {auc(sick, single):.4f} | sensitivity {s1:.1%}, specificity {p1:.1%}")
@@ -248,9 +275,7 @@ def tricks(runs, ensemble, both_eyes, final_test, target_sensitivity, n_boot, se
         print("\nIf this helps and you want it in the frozen result, rerun with --final-test (once).")
         return
     test = load_aligned(runs, "test")
-    t_sick, t_combined = test["sick"].to_numpy(), combine(test)
-    if both_eyes:
-        t_combined = (1 - w_best) * t_combined + w_best * fellow_eye(test, t_combined)
+    t_sick, t_combined = test["sick"].to_numpy(), apply_choices(choices, test)
     t_ref = t_combined >= cut                     # the cutoff chosen on validation
     boot_auc, boot_ss = [], []
     for wt in bootstrap_weights(test["patient"], n_boot, seed):

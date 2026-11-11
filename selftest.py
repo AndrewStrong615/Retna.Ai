@@ -298,6 +298,45 @@ def test_end_to_end(tmp):
           code_g == 0 and code_s == 0 and auc_of(log_g) > auc_of(log_s)
           and code_c != 0 and "validation/test patients" in log_c)
 
+    # External test (Stage 4), on a synthetic "other hospital" in Messidor-2's file formats:
+    # grades with image_id/adjudicated_* columns, a left;right pairing file, one ungradable photo.
+    run_b_dir = os.path.join(tmp, "run_binary")
+    tta_b = os.path.join(tmp, "run_binary_tta")
+    run(["tta.py", "--run", run_b_dir, "--images", processed, "--workers", "0", "--out", tta_b])
+    ext = pd.read_csv(extra_csv)
+    ext["patient"] = ext["image"].str.split("_").str[0]
+    ext["side"] = ext["image"].str.split("_").str[1]
+    has_img = ext["image"].map(lambda n: os.path.exists(os.path.join(renamed, f"{n}.jpg")))
+    pd.DataFrame({"image_id": ext["image"] + ".png", "adjudicated_dr_grade": ext["level"],
+                  "adjudicated_dme": 0, "adjudicated_gradable": has_img.astype(int)}).to_csv(
+        os.path.join(data2, "ext_grades.csv"), index=False)
+    pairs = ext.pivot(index="patient", columns="side", values="image")
+    with open(os.path.join(data2, "ext_pairs.csv"), "w") as f:      # same layout as messidor-2.csv
+        f.write("left;right \n" + "".join(f"{l}.png;{r}.png\n" for l, r in zip(pairs["left"], pairs["right"])))
+    ext_args = ["external_test.py", "--tta-runs", tta_out, tta_b, "--images", renamed,
+                "--grades", os.path.join(data2, "ext_grades.csv"), "--pairs", os.path.join(data2, "ext_pairs.csv"),
+                "--n-boot", "50", "--workers", "0"]
+    ext_out = os.path.join(tmp, "external")
+    code_e, log_e = run(ext_args + ["--out", ext_out])
+    if code_e != 0:
+        print(log_e[-3000:])
+    res = json.load(open(os.path.join(ext_out, "external_results.json"))) if code_e == 0 else {}
+    check("external_test.py: scores once with validation choices; cautious cutoff refers at least as many",
+          code_e == 0 and "EXTERNAL TEST" in log_e and res.get("n_patients") == len(pairs)
+          and res["cautious"]["cutoff"] <= res["standard"]["cutoff"]
+          and res["cautious"]["share_referred"] >= res["standard"]["share_referred"]
+          and res["n_ungradable_excluded"] == int((~has_img).sum()))
+    code_e2, log_e2 = run(ext_args + ["--out", ext_out])
+    with open(os.path.join(renamed, "preprocess.json")) as f:
+        recipe = json.load(f)
+    with open(os.path.join(renamed, "preprocess.json"), "w") as f:
+        json.dump(dict(recipe, size=128), f)
+    code_e3, log_e3 = run(ext_args + ["--out", os.path.join(tmp, "external_mismatch")])
+    with open(os.path.join(renamed, "preprocess.json"), "w") as f:
+        json.dump(recipe, f)
+    check("external_test.py refuses a second scoring and differently preprocessed photos",
+          code_e2 != 0 and "already scored once" in log_e2 and code_e3 != 0 and "preprocessed with" in log_e3)
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,
