@@ -295,7 +295,7 @@ DECISION: the next system ("Stage 2 v3") is **D1**: exp12 (pretrained ResNet-18 
 validation. Official test: `python tta.py --run runs\exp12 --images ...\processed_512_enhanced_tight --split
 test`, then `python analyze.py runs\exp12_tta --both-eyes --final-test` (once). Recorded below.
 
-## Stage 2 v3 result (frozen, current best)
+## Stage 2 v3 result (frozen)
 
 Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
 
@@ -330,7 +330,26 @@ Official test: `python tta.py --run runs\exp12b --images ...\processed_512_enhan
 scores already exist from the v3 test pass and are reused unchanged).
 Test-set budget: this is the 5th system scored on the same 5,268 test eyes (each once). Every look, even at different
 systems, makes the test set a little less "fresh"; after this, the next confirmation should come from external data
-(Messidor-2, Stage 4), not from this test set.
+(Messidor-2, Stage 4), not from this test set. Recorded below.
+
+## Stage 2 v4 result (frozen, current best)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| System (test, each touched once) | AUC | Sensitivity | Specificity | Models x views |
+|---|---|---|---|---|
+| Stage 1: exp8 + exp9, both eyes | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 2 x 1 |
+| Stage 2 v3: exp12 + TTA, both eyes | 0.936 [0.923-0.947] | 88.0% [85.5-90.5%] | 83.3% [81.7-84.7%] | 1 x 8 |
+| Stage 2 v4 validation (choices made here) | 0.947 | 90.0% | 84.5% | 2 x 8 |
+| **Stage 2 v4: exp12 + exp12b + TTA, both eyes** | **0.941** [0.929-0.951] | **88.6%** [86.2-91.0%] | **84.4%** [82.9-85.7%] | **2 x 8** |
+
+Validation to test dropped 0.006 AUC. Versus v3 on test: +0.005 AUC, +0.6 points of sensitivity, +1.1 of specificity,
+for twice the compute; the ranges overlap heavily, so "about the same or slightly better", as expected from a
+validation pass by 0.0002. From exp1 (test 0.638, 23% of healthy eyes cleared) to 0.941 and 84%, all from scratch.
+Pattern to note: both v3 and v4 landed BELOW 90% sensitivity on test (88.0%, 88.6%) with cutoffs chosen for 90.0% on
+validation (earlier systems: 89.9-90.3%). Two systems are not proof of a bias, but it makes the cautious-cutoff
+question (see v3) the first thing to settle on validation before Stage 4. This test set has now been used by 5
+systems: the next confirmation comes from external data (Messidor-2).
 
 ## Working with me
 
@@ -351,7 +370,7 @@ and don't swap my hand-written components for library versions without asking.
    (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
    visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result"); with TTA too
    (Stage 2a v2): TEST 0.925 / 90.3% / 73.5%. With 3x the labeled photos (exp12, Stage 2 v3): TEST 0.936 / 88.0% /
-   83.3%, the current best.
+   83.3%. Two seeds of that recipe (Stage 2 v4): TEST 0.941 / 88.6% / 84.4%, the current best.
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
