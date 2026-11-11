@@ -56,6 +56,13 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
   of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
   labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
+- `external_test.py` (Stage 4): scores an external dataset ONCE with a frozen system (its `<run>_tta` folders), every
+  choice re-derived from validation exactly as analyze.py does (shared `validation_choices`/`apply_choices`). Reports
+  AUC with patient-bootstrap ranges at two cutoffs fixed on validation: standard (90% of sick validation eyes) and
+  cautious (>= 90% sensitivity in 95% of validation bootstrap resamples). Messidor-2 formats: adjudicated grades CSV
+  (`image_id, adjudicated_dr_grade, adjudicated_dme, adjudicated_gradable`; ungradable photos left out) and the
+  pairing file (`left;right`, one row per patient: the patient comes from it, not from the file name). Refuses a
+  second scoring into the same `--out`, and photos preprocessed differently from the runs' training photos.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -350,6 +357,25 @@ Pattern to note: both v3 and v4 landed BELOW 90% sensitivity on test (88.0%, 88.
 validation (earlier systems: 89.9-90.3%). Two systems are not proof of a bias, but it makes the cautious-cutoff
 question (see v3) the first thing to settle on validation before Stage 4. This test set has now been used by 5
 systems: the next confirmation comes from external data (Messidor-2).
+
+## Stage 4 plan (fixed BEFORE any Messidor-2 photo is scored)
+
+Data: Messidor-2 (ADCIS; 874 patients, 1,748 photos: 1,058 .png + 690 .jpg, all in `messidor2\IMAGES`), with the
+adjudicated grades of Krause et al. 2018 (`messidor_data.csv`, Kaggle google-brain) and the ADCIS pairing file
+(`messidor-2.csv`). Kept in `%USERPROFILE%\retina-data\messidor2`, never in the repo; research/education use only,
+no redistribution; cite Krause et al. and the Messidor program partners. TEST ONLY: never trained on, never used to
+choose anything.
+System: the frozen Stage 2 v4 system (exp12_tta + exp12b_tta, both eyes w = 0.40), unchanged.
+Primary result: AUC for moderate-or-worse DR (adjudicated grade >= 2, the definition the model was trained on),
+95% range by patient bootstrap. Operating points: the standard and the cautious cutoff, both fixed on validation.
+Secondary: AUC for "grade >= 2 OR macular edema" (common in published Messidor-2 benchmarks; our model never saw a
+DME label, so expect it lower); per-grade referral shares; per-patient numbers.
+Steps: (1) `preprocess.py --src ...\messidor2\IMAGES --dst ...\messidor2\processed_512_enhanced_tight --size 512
+--enhance --tight-mask`; (2) `external_test.py --tta-runs runs\exp12_tta runs\exp12b_tta --images ... --grades ...
+--pairs ... --out runs\messidor2_v4`, once; (3) record the numbers here, whatever they are.
+Expectation (stated in advance): some drop from EyePACS is normal for a new camera/population; published from-scratch
+models often lose several points of AUC. A large drop would point to camera/preprocessing differences, and the fix
+would be more diverse TRAINING data (e.g. DDR), never tuning on Messidor-2.
 
 ## Working with me
 
