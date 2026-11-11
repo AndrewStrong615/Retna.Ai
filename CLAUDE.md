@@ -375,7 +375,35 @@ Steps: (1) `preprocess.py --src ...\messidor2\IMAGES --dst ...\messidor2\process
 --pairs ... --out runs\messidor2_v4`, once; (3) record the numbers here, whatever they are.
 Expectation (stated in advance): some drop from EyePACS is normal for a new camera/population; published from-scratch
 models often lose several points of AUC. A large drop would point to camera/preprocessing differences, and the fix
-would be more diverse TRAINING data (e.g. DDR), never tuning on Messidor-2.
+would be more diverse TRAINING data (e.g. DDR), never tuning on Messidor-2. Recorded below.
+
+## Stage 4 result: Messidor-2, external, scored once (frozen Stage 2 v4 system)
+
+`runs\messidor2_v4` (external_results.json, external_predictions.csv). 1,744 gradable photos of 874 patients (4
+ungradable left out), 457 referable (adjudicated grade >= 2, 26%). Cutoffs fixed on EyePACS validation before scoring:
+standard +0.0321, cautious -0.0391 (on validation: sens 91.8%, spec 81.0%). 95% ranges by patient bootstrap.
+
+| Messidor-2 (external) | AUC | Sensitivity | Specificity | Share of photos referred |
+|---|---|---|---|---|
+| Standard cutoff | **0.951** [0.937-0.963] | 97.6% [95.8-98.9%] | 62.5% [58.9-66.1%] | 53.2% |
+| Cautious cutoff | (same) | 98.2% [96.9-99.3%] | 57.0% [53.2-60.5%] | 57.5% |
+| For comparison: EyePACS test (v4, standard) | 0.941 [0.929-0.951] | 88.6% | 84.4% | |
+
+Secondary: AUC for "grade >= 2 OR macular edema" 0.952 (the model never saw a DME label, yet ranks those eyes as
+well). Referred by true grade (standard): grade 0 31.9%, 1 58.5%, 2 96.8%, 3 100%, 4 100%. Per patient (either eye
+flagged): sens 96.3%, spec 62.9%.
+Reading: (1) RANKING transfers: AUC 0.951 is not a drop from EyePACS; part of it is cleaner labels (adjudicated by a
+retina-specialist panel, vs one EyePACS grader), so the two AUCs are not directly comparable. (2) The CUTOFF does not
+transfer: scores run higher on Messidor-2 photos (other camera, other population), so the EyePACS cutoff refers
+over half the photos: sensitivity rises to ~98% while specificity falls from ~84% to ~62% (31.9% of grade-0 eyes
+referred). Discrimination generalizes, calibration does not: a real deployment would set its cutoff on a separate
+local calibration sample from the new site (never on the test photos), or reduce the shift with more diverse
+training cameras (DDR, APTOS). The cautious cutoff was not needed here (sensitivity already ~98%).
+Context (published, not directly comparable: much larger training sets and ImageNet-pretrained networks): Gulshan
+et al. 2016 AUC 0.990; Abramoff et al. 2016 (IDx-DR) AUC 0.980, sens 96.8%, spec 87.0%; Krause et al. 2018 AUC 0.986.
+This project: 0.951 from scratch, 78k labeled photos, one laptop GPU.
+Messidor-2 is now USED: never rescore it to choose anything; a future system can be scored on it once more only as
+an additional report (each new system scored once), and its numbers must never steer training choices.
 
 ## Working with me
 
@@ -397,6 +425,7 @@ and don't swap my hand-written components for library versions without asking.
    visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result"); with TTA too
    (Stage 2a v2): TEST 0.925 / 90.3% / 73.5%. With 3x the labeled photos (exp12, Stage 2 v3): TEST 0.936 / 88.0% /
    83.3%. Two seeds of that recipe (Stage 2 v4): TEST 0.941 / 88.6% / 84.4%, the current best.
+   External (Messidor-2, Stage 4): AUC 0.951; at the EyePACS cutoff sens 97.6%, spec 62.5% (see "Stage 4 result").
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
