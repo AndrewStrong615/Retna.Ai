@@ -154,6 +154,7 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp10 | as exp8 but `--init runs\pre1\encoder.pt` (Stage 2a: SimMIM-pretrained start, 50 epochs on ~78k unlabeled photos) | **0.905** (50) | 0.903 / 90.3% / 65.2% | Paired vs exp8: +0.0086, 95% range +0.002 to +0.016, better in 99% of resamples, above the 0.007 noise floor: passes both checks, so self-supervised pretraining is a confirmed improvement (spec at 90% sens 61.8% -> 66.0%). Clear head start: 0.765 at epoch 1, 0.783 at epoch 2 (exp8: 0.737), 0.890 at epoch 29-30; plateau from ~41 (0.902-0.905). Train-val gap wider than exp8 (train AUC 0.934 vs val 0.903, exp8 0.912 vs 0.895), but val loss lowest near the end (0.2076 at 50) and flat after, so no harmful overfitting. Grade means swing epoch to epoch early (score offset shifts; ranking stable). Same speed as exp8 (~2.25 min/epoch). |
 | exp11 | as exp10 but 768 px (`processed_768_enhanced_tight`, `--size 768`, `--init runs\pre1\encoder.pt`, batch 32, no `--accum`) | 0.909 (50) | 0.907 / 91.6% / 62.5% | Paired vs exp10: +0.0044, 95% range -0.002 to +0.011, better in 92% of resamples: fails both checks, a TIE. Spec at 90% sens lower (62.9% vs 66.0%). 768 px is not worth ~2.9x the compute; 512 px stays. TTA on exp11: 0.9090 -> 0.9140 (+0.0049), a 4th model where TTA helps. Same curve shape as exp10 (0.774 at epoch 1, 0.896 at 30, plateau 0.906-0.909 from ~44; train AUC 0.936 vs val 0.907). ~2.9x slower, not 2.25x: 67 img/s, 6.5 min/epoch (~6.6 h), some epochs 45-57 img/s with data waits of 13-17% (laptop busy/hot). |
 | exp12 | as exp10 but `--extra-labels testLabels15.csv --extra-images processed_512_enhanced_tight_unlabeled` (+53,576 labeled EyePACS 2015 test photos, training only: 78,166 training photos, 3.2x) | **0.924** (48) | 0.916 / 89.3% / 73.1% | Paired vs exp10: +0.0195, 95% range +0.011 to +0.028, better in 100% of resamples, above the 0.007 floor: passes both checks, the biggest single-run gain since 60 epochs. More labeled data is the new base recipe. TTA: 0.9242 -> 0.9293 (+0.0052, a 5th model where TTA helps). Spec at 90% sens 73.1% vs 66.0%. Faster and higher all the way: 0.826 at epoch 1 (exp10 0.765), 0.901 by epoch 16 (exp10 needed ~40), plateau 0.920-0.924 from ~42. Val loss lowest 0.1896 at 48 (exp10 0.2076). Train-val gap 0.949 vs 0.923 (exp10 0.934 vs 0.903): slightly smaller, despite 3x more weight updates. No-skill 0.3389 (extra photos' grade mix). ~6.9 min/epoch at 193 img/s (~7 h). |
+| exp12b | exp12 repeated with `--seed 43` (seed check at the 78k-photo scale; also an ensemble partner) | 0.927 (56) | 0.921 / 90.0% / 74.6% | Paired vs exp12: +0.0031, 95% range -0.002 to +0.008, better in 88% of resamples: a TIE, as a seed repeat should be. Second noise measurement: 0.003 (exp7b: 0.0001); the 0.007 floor stays cautious enough. Same curve (0.911-0.912 at epoch 30 in both, plateau from ~40, train AUC 0.947 vs val 0.927). TTA 0.9273 -> 0.9327 (+0.0055, a 6th model). Epochs 2, 6, 8 took 27-33 min with 59-67% waiting for data (laptop busy with something else: disk/CPU contention), otherwise ~7.2 min. |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
@@ -294,7 +295,7 @@ DECISION: the next system ("Stage 2 v3") is **D1**: exp12 (pretrained ResNet-18 
 validation. Official test: `python tta.py --run runs\exp12 --images ...\processed_512_enhanced_tight --split
 test`, then `python analyze.py runs\exp12_tta --both-eyes --final-test` (once). Recorded below.
 
-## Stage 2 v3 result (frozen, current best)
+## Stage 2 v3 result (frozen)
 
 Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
 
@@ -313,6 +314,42 @@ test eyes (range 85.5-90.5%, so 90% is inside it) and cleared 83.3% of healthy o
 VALIDATION and external data (Stage 4), never by retuning on this test set: a cutoff chosen for exactly 90% on 5,268
 validation eyes lands ~2-3 points either side on new eyes; a screening program that needs >= 90% would pick a more
 cautious cutoff (e.g. one that keeps 90% at the low end of a validation bootstrap).
+
+## Stage 2 v4 decision (made on validation, before touching test)
+
+Rule fixed BEFORE exp12b's results: the ensemble E1 (exp12_tta + exp12b_tta, `--ensemble --both-eyes`) replaces D1 only
+if it beats D1's validation 0.944 (0.9441) by >= 0.003, i.e. >= 0.9471. Result: E1 = **0.9473** (w = 0.40, flat
+0.35-0.45 at 0.947), spec 84.5% (D1: 83.3%). It passes by 0.0002: a pass under the rule, but the thinnest possible
+one, so expect the test result to be about the same as D1's, not clearly better. Two equal-quality seeds were the
+case where ensembling should help (unlike D2, where the weaker exp10 diluted exp12).
+DECISION: the Stage 2 v4 system is **E1**: exp12 + exp12b (same recipe, seeds 42/43), each eye scored in 8
+orientations per model, the two models' scores standardized on validation and averaged, blended with the fellow eye
+(w = 0.40), cutoff for 90% sensitivity, all chosen on validation. Cost: 2 models x 8 views per eye.
+Official test: `python tta.py --run runs\exp12b --images ...\processed_512_enhanced_tight --split test`, then
+`python analyze.py runs\exp12_tta runs\exp12b_tta --ensemble --both-eyes --final-test` (once; exp12_tta's test
+scores already exist from the v3 test pass and are reused unchanged).
+Test-set budget: this is the 5th system scored on the same 5,268 test eyes (each once). Every look, even at different
+systems, makes the test set a little less "fresh"; after this, the next confirmation should come from external data
+(Messidor-2, Stage 4), not from this test set. Recorded below.
+
+## Stage 2 v4 result (frozen, current best)
+
+Test set, evaluated once (5,268 eyes, 95% ranges by patient bootstrap):
+
+| System (test, each touched once) | AUC | Sensitivity | Specificity | Models x views |
+|---|---|---|---|---|
+| Stage 1: exp8 + exp9, both eyes | 0.915 [0.900-0.928] | 89.9% [87.6-92.0%] | 71.7% [69.8-73.6%] | 2 x 1 |
+| Stage 2 v3: exp12 + TTA, both eyes | 0.936 [0.923-0.947] | 88.0% [85.5-90.5%] | 83.3% [81.7-84.7%] | 1 x 8 |
+| Stage 2 v4 validation (choices made here) | 0.947 | 90.0% | 84.5% | 2 x 8 |
+| **Stage 2 v4: exp12 + exp12b + TTA, both eyes** | **0.941** [0.929-0.951] | **88.6%** [86.2-91.0%] | **84.4%** [82.9-85.7%] | **2 x 8** |
+
+Validation to test dropped 0.006 AUC. Versus v3 on test: +0.005 AUC, +0.6 points of sensitivity, +1.1 of specificity,
+for twice the compute; the ranges overlap heavily, so "about the same or slightly better", as expected from a
+validation pass by 0.0002. From exp1 (test 0.638, 23% of healthy eyes cleared) to 0.941 and 84%, all from scratch.
+Pattern to note: both v3 and v4 landed BELOW 90% sensitivity on test (88.0%, 88.6%) with cutoffs chosen for 90.0% on
+validation (earlier systems: 89.9-90.3%). Two systems are not proof of a bias, but it makes the cautious-cutoff
+question (see v3) the first thing to settle on validation before Stage 4. This test set has now been used by 5
+systems: the next confirmation comes from external data (Messidor-2).
 
 ## Working with me
 
@@ -333,7 +370,7 @@ and don't swap my hand-written components for library versions without asking.
    (no collapse, no blow-up). Watch out: if `train.py`/`pretrain.py` print `Device: cpu`, the NVIDIA driver is not
    visible (check `nvidia-smi`, power mode, restart); stop at once. Fine-tuned as exp10 (see the table): confirmed better than exp8. With both eyes: val 0.924, TEST 0.921 / 89.9% / 71.9% with one model (see "Stage 2a result"); with TTA too
    (Stage 2a v2): TEST 0.925 / 90.3% / 73.5%. With 3x the labeled photos (exp12, Stage 2 v3): TEST 0.936 / 88.0% /
-   83.3%, the current best.
+   83.3%. Two seeds of that recipe (Stage 2 v4): TEST 0.941 / 88.6% / 84.4%, the current best.
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
