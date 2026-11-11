@@ -307,8 +307,11 @@ def test_end_to_end(tmp):
     ext["patient"] = ext["image"].str.split("_").str[0]
     ext["side"] = ext["image"].str.split("_").str[1]
     has_img = ext["image"].map(lambda n: os.path.exists(os.path.join(renamed, f"{n}.jpg")))
-    pd.DataFrame({"image_id": ext["image"] + ".png", "adjudicated_dr_grade": ext["level"],
-                  "adjudicated_dme": 0, "adjudicated_gradable": has_img.astype(int)}).to_csv(
+    # Like the real Messidor-2 file: an ungradable photo has an EMPTY grade (and DME).
+    pd.DataFrame({"image_id": ext["image"] + ".png",
+                  "adjudicated_dr_grade": ext["level"].where(has_img),
+                  "adjudicated_dme": pd.Series(0, index=ext.index).where(has_img),
+                  "adjudicated_gradable": has_img.astype(int)}).to_csv(
         os.path.join(data2, "ext_grades.csv"), index=False)
     pairs = ext.pivot(index="patient", columns="side", values="image")
     with open(os.path.join(data2, "ext_pairs.csv"), "w") as f:      # same layout as messidor-2.csv

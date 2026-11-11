@@ -97,16 +97,20 @@ def load_external(grades_csv, pairs_csv, images):
         for side in ("left", "right"):
             patient_of[stem(row[side])] = f"P{i:04d}"
 
-    df = pd.DataFrame({"image": grades["image_id"].map(stem),
-                       "level": grades["adjudicated_dr_grade"].astype(int),
-                       "dme": grades["adjudicated_dme"].astype(int),
-                       "gradable": grades["adjudicated_gradable"].astype(int)})
-    unpaired = sorted(set(df["image"]) - set(patient_of))
+    images_all = grades["image_id"].map(stem)
+    unpaired = sorted(set(images_all) - set(patient_of))
     if unpaired:
         raise SystemExit(f"{len(unpaired)} graded photos are not in the pairing file (e.g. {unpaired[:3]}).")
+    # Ungradable photos have an EMPTY grade in the Messidor-2 file, so set them aside BEFORE
+    # turning grades into whole numbers. A photo counts as gradable only if it is marked
+    # gradable and actually has a DR grade.
+    num = lambda col: pd.to_numeric(grades[col], errors="coerce")
+    gradable = (num("adjudicated_gradable") == 1) & num("adjudicated_dr_grade").notna()
+    n_ungradable = int((~gradable).sum())
+    df = pd.DataFrame({"image": images_all[gradable],
+                       "level": num("adjudicated_dr_grade")[gradable].astype(int),
+                       "dme": num("adjudicated_dme")[gradable].fillna(0).astype(int)})
     df["patient"] = df["image"].map(patient_of)
-    n_ungradable = int((df["gradable"] == 0).sum())
-    df = df[df["gradable"] == 1].copy()
     missing = df[~df["image"].map(lambda n: os.path.exists(os.path.join(images, f"{n}.jpg")))]
     if len(missing):
         raise SystemExit(f"{len(missing)} gradable photos have no preprocessed image in {images} "
