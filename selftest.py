@@ -273,7 +273,7 @@ def test_end_to_end(tmp):
         pd.read_csv(os.path.join(run_o, "val_predictions.csv"))["image"].tolist()
     extra_rec = json.load(open(os.path.join(out, "config.json")))["extra"] if code == 0 else None
     check("train.py --extra-labels: extra photos join training only, validation eyes unchanged",
-          same_val and "extra:" in log and extra_rec and extra_rec["n_images"] > 50)
+          same_val and "extra:" in log and extra_rec and extra_rec[0]["n_images"] > 50)
     code_b, log_b = run(base + ["--extra-labels", bad_csv, "--extra-images", renamed,
                                 "--out", os.path.join(tmp, "run_extra_bad")])
     with open(os.path.join(renamed, "preprocess.json")) as f:
@@ -297,6 +297,49 @@ def test_end_to_end(tmp):
     check("check_labels.py: real grades score higher than shuffled ones; held-out patients refused",
           code_g == 0 and code_s == 0 and auc_of(log_g) > auc_of(log_s)
           and code_c != 0 and "validation/test patients" in log_c)
+
+    # DDR: the converter (drops ungradable grade 5 and label lines without a photo), preprocess.py
+    # with several source folders (and its refusal of duplicate names), and training with TWO
+    # extra datasets at once. A fake DDR layout: DR_grading/{train,valid,test}.txt + photo folders.
+    ddr = os.path.join(data2, "DR_grading")
+    # Only photos that preprocess fine (the synthetic set has one deliberately corrupt file).
+    raw2 = sorted(f for f in os.listdir(os.path.join(data2, "raw"))
+                  if f.endswith(".jpeg") and os.path.exists(os.path.join(p2, f[:-5] + ".jpg")))
+    lab2_map = dict(zip(lab2["image"], lab2["level"]))
+    expected = 0
+    for k, part in enumerate(("train", "valid", "test")):
+        os.makedirs(os.path.join(ddr, part))
+        lines = []
+        for j, f in enumerate(raw2[k * 12:(k + 1) * 12]):
+            name = f"{k:03d}-{j:04d}-000.jpg"            # DDR-style name: no "_", no patient number
+            grade = 5 if j == 0 else lab2_map[f[:-5]]    # one ungradable photo per part
+            if j != 1:                                   # one label line without its photo per part
+                shutil.copy(os.path.join(data2, "raw", f), os.path.join(ddr, part, name))
+            lines.append(f"{name} {grade}")
+            expected += j not in (0, 1)
+        with open(os.path.join(ddr, f"{part}.txt"), "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+    ddr_csv = os.path.join(data2, "ddr_labels.csv")
+    code_c, log_c = run(["convert_ddr.py", "--root", ddr, "--out", ddr_csv])
+    rows = pd.read_csv(ddr_csv) if code_c == 0 else pd.DataFrame()
+    check("convert_ddr.py: keeps gradable photos with a file, drops grade 5 and missing photos",
+          code_c == 0 and len(rows) == expected and rows["level"].between(0, 4).all())
+    ddr_proc = os.path.join(data2, "processed_ddr")
+    code_p, log_p = run(["preprocess.py", "--src"] + [os.path.join(ddr, q) for q in ("train", "valid", "test")]
+                        + ["--dst", ddr_proc, "--size", "96", "--workers", "2"])
+    n_out = len([f for f in os.listdir(ddr_proc) if f.endswith(".jpg")]) if code_p == 0 else 0
+    dup = os.path.join(data2, "dup_src")
+    os.makedirs(dup)
+    shutil.copy(os.path.join(ddr, "train", "000-0002-000.jpg"), dup)
+    code_d, log_d = run(["preprocess.py", "--src", os.path.join(ddr, "train"), dup,
+                         "--dst", os.path.join(data2, "processed_dup"), "--size", "96", "--workers", "2"])
+    check("preprocess.py: several source folders into one, refuses duplicate names",
+          code_p == 0 and n_out == 33 and code_d != 0 and "names must be unique" in log_d)
+    out = os.path.join(tmp, "run_two_extras")
+    code, log = run(base + ["--extra-labels", extra_csv, ddr_csv, "--extra-images", renamed, ddr_proc, "--out", out])
+    rec = json.load(open(os.path.join(out, "config.json")))["extra"] if code == 0 else []
+    check("train.py: two extra datasets at once, each recorded",
+          code == 0 and len(rec) == 2 and rec[1]["n_images"] == expected and "train now" in log)
 
     # External test (Stage 4), on a synthetic "other hospital" in Messidor-2's file formats:
     # grades with image_id/adjudicated_* columns, a left;right pairing file, one ungradable photo.

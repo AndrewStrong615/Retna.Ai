@@ -22,7 +22,8 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `preprocess.py`: crop black border, pad to square, resize, optional local-average-color enhancement. Run once.
   `--tight-mask` (off by default) uses each photo's real eye outline instead of a fixed circle, trims
   `--mask-margin` (2% of the size) at the edge, and with `--enhance` blurs only inside the eye, so no bright rim
-  or dark crescents (seen where heat maps drifted on missed eyes). Writes `preprocess.json` into the output folder;
+  or dark crescents (seen where heat maps drifted on missed eyes). `--src` takes several folders (e.g. DDR's train,
+  valid, test) into one output folder and refuses duplicate names. Writes `preprocess.json` into the output folder;
   train.py copies it into each run's config.json.
 - `model.py`: ResNet-18-style network written from scratch. `python model.py` prints shapes per stage.
   `build_model(depth, pool, dropout)` builds it: depth 18 (default) or 34 (ResNet-34, 21.3M weights); pool `avg`
@@ -43,6 +44,11 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   eyes unchanged, so runs stay paired); refuses any validation/test patient and a folder preprocessed differently
   (preprocess.json); mean/std and background stay measured on the original training photos; recorded in config.json
   (`extra`) and `extra_split.csv`. Without the flags, training is bit-identical to before (checked on CPU).
+  Several extra datasets at once: `--extra-labels A.csv B.csv --extra-images dirA dirB` (same order); with one
+  extra dataset the training table is identical to before (checked on CPU against the old code's run).
+- `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
+  `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate
+  names and grades outside 0-5. All of DDR is training data (our validation/test stay pure EyePACS).
 - `pretrain.py` (Stage 2): SimMIM-style masked image modeling, written from scratch, for the SAME network as
   Stage 1: hide 60% of the image in 32x32 squares (learned mask color), the ResNet stem+stages encode, a 1x1 conv
   + PixelShuffle redraws the pixels, L1 loss on hidden pixels only. Leaves out every image of the labeled
@@ -405,6 +411,23 @@ et al. 2016 AUC 0.990; Abramoff et al. 2016 (IDx-DR) AUC 0.980, sens 96.8%, spec
 This project: 0.951 from scratch, 78k labeled photos, one laptop GPU.
 Messidor-2 is now USED: never rescore it to choose anything; a future system can be scored on it once more only as
 an additional report (each new system scored once), and its numbers must never steer training choices.
+
+## Next: DDR as extra training data (exp14), plan fixed BEFORE any DDR run
+
+Why: on EyePACS alone the recipe is near its limit (size, 768 px, weight decay: ties), more labeled photos gave the
+biggest gain (+0.0195), and Messidor-2 showed that the model's scores shift with a new camera. DDR (Li et al. 2019:
+13,673 photos, 147 hospitals in 23 Chinese provinces, many cameras; grade 5 = ungradable, dropped) adds both more
+labels and camera diversity. TRAINING only; kept in `%USERPROFILE%\retina-data\ddr`, labels CSV in
+`retina-data\data`, never in the repo; follow its license.
+Steps: (1) `convert_ddr.py` -> `ddr_labels.csv`; (2) `preprocess.py --src <train> <valid> <test> --dst
+...\processed_512_enhanced_tight_ddr --size 512 --enhance --tight-mask`; (3) `check_labels.py --run runs\exp12` on
+DDR: a sanity check that photos and grades line up (expected below EyePACS's ~0.92, since other graders and
+cameras; clearly above 0.5 is enough); (4) exp14 = exp13 (`--wd 0.1`) + DDR as a second extra dataset, ONE change
+vs exp13; (5) `analyze.py runs\exp13 runs\exp14 --noise-floor 0.007`.
+Decision rule (fixed now): validation is pure EyePACS, which cannot show DDR's main expected benefit (other cameras).
+So DDR joins the recipe if exp14 is NOT WORSE than exp13 on validation: the paired difference's 95% range must not go
+below -0.007 (the noise floor). A clear gain (both checks passed) is a bonus. If it is worse, DDR is left out.
+Messidor-2 is used and must not steer this choice; a future system with DDR may be scored on it once, as a report.
 
 ## Working with me
 

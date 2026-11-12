@@ -336,11 +336,11 @@ def main():
                    help="GPU only: alternative memory layout (slower on the RTX 5060; see bench.py)")
     p.add_argument("--cudnn-benchmark", type=int, choices=[0, 1], default=1,
                    help="GPU only: let cuDNN time its algorithms once and keep the fastest")
-    p.add_argument("--extra-labels", default=None,
-                   help="CSV (image,level) of more labeled photos, added to the TRAINING split only, "
-                        "e.g. testLabels15.csv (the published grades of the EyePACS test folder)")
-    p.add_argument("--extra-images", default=None,
-                   help="folder with the --extra-labels photos, preprocessed exactly like --images")
+    p.add_argument("--extra-labels", nargs="+", default=None,
+                   help="one or more CSVs (image,level) of more labeled photos, added to the TRAINING split "
+                        "only, e.g. testLabels15.csv (EyePACS test folder grades) and ddr_labels.csv (DDR)")
+    p.add_argument("--extra-images", nargs="+", default=None,
+                   help="the folder of each --extra-labels CSV, in the same order, preprocessed like --images")
     p.add_argument("--limit", type=int, default=0, help="use only about N images, for quick tests")
     p.add_argument("--split-seed", type=int, default=42,
                    help="which patients go to train/val/test (keep 42 to compare runs)")
@@ -408,22 +408,19 @@ def main():
     # a run with extra data can be compared paired with a run without it.
     # The normalization (mean/std) and background color above were measured on the
     # original training photos only, so they too stay identical to earlier runs.
+    # Several extra datasets can be given (e.g. EyePACS test-folder grades AND DDR): each CSV goes
+    # with the folder at the same position in --extra-images, and each is checked on its own.
     extra_info = None
     if args.extra_labels:
-        if not args.extra_images:
-            raise SystemExit("--extra-labels needs --extra-images (the folder with those photos).")
-        extra = load_labels(args.extra_labels, referable_from=REFERABLE_FROM)[["image", "level", "label", "patient"]]
+        if not args.extra_images or len(args.extra_images) != len(args.extra_labels):
+            raise SystemExit("--extra-labels needs one --extra-images folder per CSV, in the same order.")
         # Rule: a validation or test patient must never be seen in training, not
         # even through another dataset's copy of their photos.
         # (Recomputed from the full label table, so eyes skipped for a missing image or by
         # --limit still count as held out.)
         _, val_all, test_all = split_by_patient(df, seed=args.split_seed)
         held_out = set(val_all["patient"]) | set(test_all["patient"])
-        clash = sorted(set(extra["patient"]) & held_out)
-        if clash:
-            raise SystemExit(f"{len(clash)} patients in {args.extra_labels} are validation/test patients "
-                             f"(e.g. {clash[:5]}). Extra photos may only add NEW patients to training.")
-        overlap_train = len(set(extra["patient"]) & set(train_df["patient"]))
+
         # Both folders must have been made the same way, or the model would see two kinds of photo.
         def recipe(folder):
             path = os.path.join(folder, "preprocess.json")
@@ -432,23 +429,35 @@ def main():
             with open(path) as f:
                 info = json.load(f)
             return {k: info.get(k) for k in ("size", "enhance", "tight_mask", "mask_margin")}
-        if recipe(args.images) and recipe(args.extra_images) and recipe(args.images) != recipe(args.extra_images):
-            raise SystemExit(f"The two image folders were preprocessed differently: {recipe(args.images)} vs "
-                             f"{recipe(args.extra_images)}. Preprocess the extra photos the same way.")
-        exists = extra["image"].map(lambda n: os.path.exists(f"{args.extra_images}/{n}.jpg"))
-        extra_missing = int((~exists).sum())
-        extra = extra[exists]
-        if args.limit:
-            extra = extra.sample(frac=min(1.0, args.limit / len(df)), random_state=args.split_seed)
-        extra = extra.assign(image_dir=args.extra_images)
-        extra.to_csv(f"{args.out}/extra_split.csv", index=False)
-        train_df = pd.concat([train_df.assign(image_dir=args.images), extra], ignore_index=True)
-        extra_info = {"labels": os.path.abspath(args.extra_labels), "images": os.path.abspath(args.extra_images),
-                      "n_images": len(extra), "missing_images": extra_missing,
-                      "patients_also_in_train": overlap_train,
-                      "grade_counts": extra["level"].value_counts().sort_index().to_dict()}
-        print(f"extra: {len(extra):6d} images, {extra['label'].mean():.1%} referable (training only; "
-              f"{extra_missing} labels had no image) -> train now {len(train_df)} images")
+
+        extras, extra_info = [], []
+        for labels_csv, folder in zip(args.extra_labels, args.extra_images):
+            extra = load_labels(labels_csv, referable_from=REFERABLE_FROM)[["image", "level", "label", "patient"]]
+            clash = sorted(set(extra["patient"]) & held_out)
+            if clash:
+                raise SystemExit(f"{len(clash)} patients in {labels_csv} are validation/test patients "
+                                 f"(e.g. {clash[:5]}). Extra photos may only add NEW patients to training.")
+            overlap_train = len(set(extra["patient"]) & set(train_df["patient"]))
+            if recipe(args.images) and recipe(folder) and recipe(args.images) != recipe(folder):
+                raise SystemExit(f"The image folders were preprocessed differently: {recipe(args.images)} vs "
+                                 f"{recipe(folder)} ({folder}). Preprocess the extra photos the same way.")
+            exists = extra["image"].map(lambda n: os.path.exists(f"{folder}/{n}.jpg"))
+            extra_missing = int((~exists).sum())
+            extra = extra[exists]
+            if args.limit:
+                extra = extra.sample(frac=min(1.0, args.limit / len(df)), random_state=args.split_seed)
+            extra = extra.assign(image_dir=folder)
+            extras.append(extra)
+            extra_info.append({"labels": os.path.abspath(labels_csv), "images": os.path.abspath(folder),
+                               "n_images": len(extra), "missing_images": extra_missing,
+                               "patients_also_in_train": overlap_train,
+                               "grade_counts": extra["level"].value_counts().sort_index().to_dict()})
+            print(f"extra: {len(extra):6d} images, {extra['label'].mean():.1%} referable from "
+                  f"{os.path.basename(labels_csv)} (training only; {extra_missing} labels had no image)")
+        pd.concat([e.assign(source=os.path.basename(c)) for e, c in zip(extras, args.extra_labels)],
+                  ignore_index=True).to_csv(f"{args.out}/extra_split.csv", index=False)
+        train_df = pd.concat([train_df.assign(image_dir=args.images)] + extras, ignore_index=True)
+        print(f"       -> train now {len(train_df)} images")
 
     def loader(part, tf, n_workers, shuffle=False, keep_workers=False, batch=args.batch):
         # persistent_workers keeps the helper processes alive between epochs.

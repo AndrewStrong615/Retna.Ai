@@ -139,7 +139,8 @@ def process_one(job):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--src", required=True, help="folder of raw images")
+    p.add_argument("--src", required=True, nargs="+",
+                   help="folder(s) of raw images (several = one output folder, e.g. DDR's train valid test)")
     p.add_argument("--dst", required=True, help="output folder")
     p.add_argument("--size", type=int, default=384)
     p.add_argument("--enhance", action="store_true", help="apply local average color subtraction")
@@ -152,13 +153,19 @@ def main():
 
     os.makedirs(args.dst, exist_ok=True)
     exts = (".jpeg", ".jpg", ".png", ".tif", ".tiff")
-    jobs = []
-    for name in sorted(os.listdir(args.src)):
-        if name.lower().endswith(exts):
-            stem = os.path.splitext(name)[0]
-            jobs.append((os.path.join(args.src, name),
-                         os.path.join(args.dst, stem + ".jpg"),
-                         args.size, args.enhance, args.tight_mask, args.mask_margin))
+    jobs, seen = [], {}
+    for src in args.src:
+        for name in sorted(os.listdir(src)):
+            if name.lower().endswith(exts):
+                stem = os.path.splitext(name)[0]
+                # Two photos with the same name (from two source folders) would overwrite
+                # each other in the output folder: refuse instead of silently losing one.
+                if stem in seen:
+                    raise SystemExit(f"{name} is in both {seen[stem]} and {src}: names must be unique.")
+                seen[stem] = src
+                jobs.append((os.path.join(src, name),
+                             os.path.join(args.dst, stem + ".jpg"),
+                             args.size, args.enhance, args.tight_mask, args.mask_margin))
 
     print(f"Processing {len(jobs)} images with {args.workers} workers...")
     errors = []
