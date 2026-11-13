@@ -437,6 +437,17 @@ second external check of a single EyePACS model on Chinese hospital photos: rank
 smaller cutoff shift (spec 79% vs 62.5% on Messidor-2). DDR is training data from now on, never a test.
 exp14 vs exp13: +0.0013 [-0.003, +0.006] -> not worse -> DDR joins the recipe (base recipe now: exp13 + DDR).
 
+## Report plan: does DDR reduce the camera shift? (fixed BEFORE scoring; report only, decides nothing)
+
+The DDR decision is already made (exp14 vs exp13: not worse, DDR joins). This only measures what DDR was meant to
+help and EyePACS validation cannot see: behavior on another hospital's photos. Two new single-model systems, each
+scored on Messidor-2 ONCE with `external_test.py`, everything else equal:
+- S13 = exp13 (no DDR) + 8-view TTA + both eyes; S14 = exp14 (+ DDR) + 8-view TTA + both eyes.
+- w and both cutoffs come from each run's own EyePACS validation, as always.
+Readouts: (1) specificity at the standard cutoff (the shift: v4 had 62.5%; a smaller shift = higher specificity at
+similar sensitivity); (2) share of photos referred; (3) AUC (ranking). Hypothesis: S14 shows a smaller shift than S13.
+Messidor-2 is then used by 3 systems (v4, S13, S14), each once; none of these numbers may steer training choices.
+
 ## Working with me
 
 I'm learning ML through this project. Explain what you change and why, keep code well commented,
