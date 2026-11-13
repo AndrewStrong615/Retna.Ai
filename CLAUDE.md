@@ -448,6 +448,23 @@ Readouts: (1) specificity at the standard cutoff (the shift: v4 had 62.5%; a sma
 similar sensitivity); (2) share of photos referred; (3) AUC (ranking). Hypothesis: S14 shows a smaller shift than S13.
 Messidor-2 is then used by 3 systems (v4, S13, S14), each once; none of these numbers may steer training choices.
 
+Results (each scored once; TTA on validation: exp14 0.9297 -> 0.9320, +0.0024, the smallest TTA gain so far):
+
+| Messidor-2, single model + TTA + both eyes | AUC | Sens (standard) | Spec (standard) | Referred | Grade 0 referred |
+|---|---|---|---|---|---|
+| S13 (exp13, no DDR) | 0.952 [0.938-0.963] | 98.0% | 59.0% | 56.0% | 35.7% |
+| S14 (exp14, + DDR) | **0.964** [0.952-0.972] | 99.8% | **43.0%** | 68.2% | 51.1% |
+
+(Cautious cutoff: S13 98.5% / 52.6%; S14 100.0% / 35.1%. "grade >= 2 or DME" AUC: 0.953 / 0.964.)
+HYPOTHESIS REFUTED for the shift: with DDR the EyePACS cutoff refers MORE Messidor-2 photos (68% vs 56%; half of
+the grade-0 eyes), so the shift got worse, not better. But RANKING improved (+0.012 AUC). Likely reason: DDR is ~45%
+referable vs ~19% in EyePACS, and its photos come from other cameras, so the model can learn "non-EyePACS-looking
+photo -> more likely sick" (a source/prevalence shortcut); Messidor-2 photos then score higher overall. DDR's own
+grading also puts "mild" eyes higher (see the DDR check). Practical reading: on a new site the cutoff must be set
+locally anyway (calibration does not transfer), and then ranking (AUC) is what matters, which DDR improved.
+These numbers were generated on Messidor-2, so they may suggest hypotheses (e.g. balance DDR's grade mix / prevalence
+to EyePACS's when sampling it) but cannot confirm them: testing such a fix needs ANOTHER untouched external set.
+
 ## Working with me
 
 I'm learning ML through this project. Explain what you change and why, keep code well commented,
