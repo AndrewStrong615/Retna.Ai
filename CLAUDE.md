@@ -465,6 +465,18 @@ locally anyway (calibration does not transfer), and then ranking (AUC) is what m
 These numbers were generated on Messidor-2, so they may suggest hypotheses (e.g. balance DDR's grade mix / prevalence
 to EyePACS's when sampling it) but cannot confirm them: testing such a fix needs ANOTHER untouched external set.
 
+## exp15 plan: DDR balanced to EyePACS's disease rate (fixed BEFORE the run)
+
+Hypothesis (generated on Messidor-2, so Messidor-2 cannot confirm it): DDR's high referable share (~45% vs EyePACS
+~19.7%) plus its different cameras teaches a source shortcut that pushes all non-EyePACS photos up. Fix to test:
+keep all gradable non-referable DDR photos (grades 0-1) and a random sample (seed 0) of the referable ones, so that
+DDR's referable share equals EyePACS training's 19.7% (`ddr_labels_balanced.csv`, made by a one-line pandas command).
+exp15 = exp14 with `ddr_labels_balanced.csv` instead of `ddr_labels.csv`: ONE change.
+Readouts: (1) EyePACS validation, paired vs exp14 (`analyze.py runs\exp14 runs\exp15 --noise-floor 0.007`): must
+be NOT WORSE (95% range lower bound > -0.007), it throws away ~3,900 sick DDR photos; (2) the real question (does the
+shift shrink?) can only be answered on a NEW external set never used before (e.g. IDRiD or APTOS, chosen and frozen
+before scoring S14 and S15 on it once each). Messidor-2 must not be used to judge exp15.
+
 ## Working with me
 
 I'm learning ML through this project. Explain what you change and why, keep code well commented,
