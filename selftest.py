@@ -383,6 +383,17 @@ def test_end_to_end(tmp):
     check("external_test.py refuses a second scoring and differently preprocessed photos",
           code_e2 != 0 and "already scored once" in log_e2 and code_e3 != 0 and "preprocessed with" in log_e3)
 
+    # APTOS format (id_code, diagnosis; no pairing file): every photo is its own patient, both-eyes off.
+    aptos_csv = os.path.join(data2, "aptos_grades.csv")
+    ext[has_img].assign(id_code=ext["image"], diagnosis=ext["level"])[["id_code", "diagnosis"]].to_csv(
+        aptos_csv, index=False)
+    code_a, log_a = run(["external_test.py", "--tta-runs", tta_out, "--images", renamed, "--grades", aptos_csv,
+                         "--n-boot", "50", "--workers", "0", "--out", os.path.join(tmp, "external_aptos")])
+    res_a = json.load(open(os.path.join(tmp, "external_aptos", "external_results.json"))) if code_a == 0 else {}
+    check("external_test.py reads APTOS grades without pairing: one photo = one patient, no both-eyes",
+          code_a == 0 and "APTOS grades" in log_a and res_a.get("n_patients") == res_a.get("n_images") == int(has_img.sum())
+          and res_a.get("both_eyes_w") == 0 and "macular edema" not in log_a)
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,

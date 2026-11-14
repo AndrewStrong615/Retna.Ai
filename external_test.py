@@ -4,8 +4,8 @@ External validation (Stage 4): score photos from ANOTHER hospital, once, with a 
 Every number so far came from EyePACS (same clinics, cameras and graders). This script
 answers the question those numbers cannot: does the system still work on photos it has
 never seen anything like? It is built for Messidor-2 (France, different camera, grades
-adjudicated by a panel of retina specialists: Krause et al., 2018), but works for any
-dataset given in the same format.
+adjudicated by a panel of retina specialists: Krause et al., 2018) and APTOS 2019 (India),
+and reads plain image,level files too (the format is detected from the columns).
 
 Nothing is chosen here. The system is defined by its `<run>_tta` folders, and every
 choice is re-derived from their VALIDATION predictions exactly as analyze.py does
@@ -35,6 +35,10 @@ Usage (Windows, after preprocessing the photos like the training photos):
          --images %USERPROFILE%\\retina-data\\messidor2\\processed_512_enhanced_tight
          --grades %USERPROFILE%\\retina-data\\messidor2\\messidor_data.csv
          --pairs %USERPROFILE%\\retina-data\\messidor2\\messidor-2.csv --out runs\\messidor2_v4
+APTOS 2019 (no patient pairing: leave out --pairs; each photo is its own patient, both-eyes blend off):
+  python external_test.py --tta-runs runs\\exp15_tta
+         --images %USERPROFILE%\\retina-data\\aptos\\processed_512_enhanced_tight
+         --grades %USERPROFILE%\\retina-data\\aptos\\trainLabels19.csv --out runs\\aptos_s15
 If you use Messidor-2 results, cite Krause et al. (2018) and the Messidor program partners
 (see messidor_readme.txt and the ADCIS page).
 """
@@ -77,48 +81,70 @@ def cautious_cutoff(sick, score, patients, target_sensitivity, n_boot=2000, seed
     return float(np.percentile(cuts, 100 * level))
 
 
-def load_external(grades_csv, pairs_csv, images):
+def read_grades(grades_csv):
     """
-    One row per gradable photo: image (file name without extension, as preprocess.py
-    writes it), patient (from the pairing file), DR grade, DME. Columns are those of the
-    Messidor-2 adjudicated grades (Krause et al.) and the ADCIS pairing file.
+    The grades file, in one of the formats this script knows (detected from its columns):
+      - Messidor-2 adjudicated grades (Krause et al.): image_id, adjudicated_dr_grade,
+        adjudicated_dme, adjudicated_gradable. Ungradable photos have an EMPTY grade.
+      - APTOS 2019 (Kaggle): id_code, diagnosis. No DME, every photo gradable.
+      - plain: image, level (like EyePACS's trainLabels.csv).
+    Returns (image names WITHOUT extension, DR grade or NaN, DME 0/1 or None, gradable mask, format name).
     """
     grades = pd.read_csv(grades_csv)
-    need = {"image_id", "adjudicated_dr_grade", "adjudicated_dme", "adjudicated_gradable"}
-    if not need <= set(grades.columns):
-        raise SystemExit(f"{grades_csv} needs columns {sorted(need)}, has {list(grades.columns)}.")
+    cols = set(grades.columns)
+    stem = lambda name: os.path.splitext(str(name).strip())[0]
+    num = lambda col: pd.to_numeric(grades[col], errors="coerce")
+    if {"image_id", "adjudicated_dr_grade", "adjudicated_dme", "adjudicated_gradable"} <= cols:
+        level = num("adjudicated_dr_grade")
+        # A photo counts as gradable only if it is marked gradable AND actually has a DR grade.
+        gradable = (num("adjudicated_gradable") == 1) & level.notna()
+        return grades["image_id"].map(stem), level, num("adjudicated_dme"), gradable, "Messidor-2"
+    for image_col, grade_col, name in (("id_code", "diagnosis", "APTOS"), ("image", "level", "plain")):
+        if {image_col, grade_col} <= cols:
+            level = num(grade_col)
+            return grades[image_col].map(stem), level, None, level.notna(), name
+    raise SystemExit(f"{grades_csv}: unknown format, columns {list(grades.columns)}. Expected Messidor-2 "
+                     "(image_id, adjudicated_*), APTOS (id_code, diagnosis) or plain (image, level).")
+
+
+def read_pairs(pairs_csv):
+    """ADCIS pairing file (one row per patient, columns left;right) -> {image name: patient id}."""
     pairs = pd.read_csv(pairs_csv, sep=";")
     pairs.columns = [c.strip().lower() for c in pairs.columns]        # the file has "right " with a space
     if not {"left", "right"} <= set(pairs.columns):
         raise SystemExit(f"{pairs_csv} needs columns left;right, has {list(pairs.columns)}.")
     stem = lambda name: os.path.splitext(str(name).strip())[0]
-    patient_of = {}
-    for i, row in pairs.iterrows():
-        for side in ("left", "right"):
-            patient_of[stem(row[side])] = f"P{i:04d}"
+    return {stem(row[side]): f"P{i:04d}" for i, row in pairs.iterrows() for side in ("left", "right")}, len(pairs)
 
-    images_all = grades["image_id"].map(stem)
-    unpaired = sorted(set(images_all) - set(patient_of))
-    if unpaired:
-        raise SystemExit(f"{len(unpaired)} graded photos are not in the pairing file (e.g. {unpaired[:3]}).")
-    # Ungradable photos have an EMPTY grade in the Messidor-2 file, so set them aside BEFORE
-    # turning grades into whole numbers. A photo counts as gradable only if it is marked
-    # gradable and actually has a DR grade.
-    num = lambda col: pd.to_numeric(grades[col], errors="coerce")
-    gradable = (num("adjudicated_gradable") == 1) & num("adjudicated_dr_grade").notna()
+
+def load_external(grades_csv, pairs_csv, images):
+    """
+    One row per gradable photo: image (file name without extension, as preprocess.py
+    writes it), patient, DR grade, DME. With a pairing file the patient comes from it;
+    without one (APTOS has no patient or eye information) every photo is its own patient.
+    """
+    images_all, level, dme, gradable, fmt = read_grades(grades_csv)
+    if pairs_csv:
+        patient_of, n_pairs = read_pairs(pairs_csv)
+        unpaired = sorted(set(images_all) - set(patient_of))
+        if unpaired:
+            raise SystemExit(f"{len(unpaired)} graded photos are not in the pairing file (e.g. {unpaired[:3]}).")
+    else:
+        patient_of, n_pairs = {name: name for name in images_all}, None
     n_ungradable = int((~gradable).sum())
-    df = pd.DataFrame({"image": images_all[gradable],
-                       "level": num("adjudicated_dr_grade")[gradable].astype(int),
-                       "dme": num("adjudicated_dme")[gradable].fillna(0).astype(int)})
+    df = pd.DataFrame({"image": images_all[gradable], "level": level[gradable].astype(int),
+                       "dme": (dme[gradable].fillna(0) if dme is not None else 0)})
+    df["dme"] = df["dme"].astype(int)
     df["patient"] = df["image"].map(patient_of)
     missing = df[~df["image"].map(lambda n: os.path.exists(os.path.join(images, f"{n}.jpg")))]
     if len(missing):
         raise SystemExit(f"{len(missing)} gradable photos have no preprocessed image in {images} "
-                         f"(e.g. {missing['image'].head(3).tolist()}). Preprocess the whole IMAGES folder.")
+                         f"(e.g. {missing['image'].head(3).tolist()}). Preprocess the whole image folder.")
     df["sick"] = df["level"] >= REFERABLE_FROM
-    # Secondary definition used by many published benchmarks: moderate-or-worse DR OR macular edema.
+    # Secondary definition used by many published benchmarks: moderate-or-worse DR OR macular edema
+    # (only when the file has DME grades).
     df["sick_or_dme"] = df["sick"] | (df["dme"] == 1)
-    return df.reset_index(drop=True), n_ungradable, len(pairs)
+    return df.reset_index(drop=True), n_ungradable, n_pairs, fmt, dme is not None
 
 
 def source_run(tta_dir):
@@ -151,7 +177,7 @@ def check_recipe(run, images):
                          "Preprocess the external photos the same way.")
 
 
-def report(df, score, cut_std, cut_caution, n_boot, seed):
+def report(df, score, cut_std, cut_caution, n_boot, seed, has_dme=True):
     """Print the external results and return them as a dict."""
     sick, sick_dme = df["sick"].to_numpy(), df["sick_or_dme"].to_numpy()
     out = {"n_images": len(df), "n_patients": int(df["patient"].nunique()),
@@ -173,9 +199,10 @@ def report(df, score, cut_std, cut_caution, n_boot, seed):
                      "share_referred": float(ref.mean())}
         print(f"  {name:8s} cutoff: sensitivity {s:.1%} {range95(bs[:, 0], True)} | "
               f"specificity {p:.1%} {range95(bs[:, 1], True)} | refers {ref.mean():.1%} of photos")
-    a2 = auc(sick_dme, score)
-    out["auc_referable_or_dme"] = a2
-    print(f"  AUC (moderate-or-worse DR OR macular edema, a common published definition): {a2:.3f}")
+    if has_dme:
+        a2 = auc(sick_dme, score)
+        out["auc_referable_or_dme"] = a2
+        print(f"  AUC (moderate-or-worse DR OR macular edema, a common published definition): {a2:.3f}")
     print("\nShare referred by true grade (standard / cautious cutoff):")
     for g, part in df.groupby("level"):
         idx = part.index.to_numpy()
@@ -195,7 +222,9 @@ def main():
                    help="the frozen system's <run>_tta folders (two or more = ensemble)")
     p.add_argument("--images", required=True, help="the external photos, preprocessed like the training photos")
     p.add_argument("--grades", required=True, help="grades CSV (Messidor-2 adjudicated format)")
-    p.add_argument("--pairs", required=True, help="pairing CSV, one row per patient: left;right")
+    p.add_argument("--pairs", default=None,
+                   help="pairing CSV, one row per patient: left;right (Messidor-2). Without it (APTOS) every "
+                        "photo is its own patient and the both-eyes blend is off")
     p.add_argument("--out", required=True, help="new folder for this external result, e.g. runs/messidor2_v4")
     p.add_argument("--no-both-eyes", action="store_true", help="score each eye alone (default: blend like the system)")
     p.add_argument("--target-sensitivity", type=float, default=0.90)
@@ -212,7 +241,11 @@ def main():
 
     # 1. The system's choices, all from validation (identical to analyze.py's).
     runs = [source_run(d) for d in args.tta_runs]
-    both_eyes = not args.no_both_eyes
+    # Without a pairing file there is no fellow eye, so no blend; the cutoff must then also be chosen
+    # on UNblended validation scores, or it would not fit the scores it is applied to.
+    both_eyes = not args.no_both_eyes and args.pairs is not None
+    if not args.pairs and not args.no_both_eyes:
+        print("No --pairs: each photo is its own patient, both-eyes blend OFF (cutoffs chosen without it).")
     choices = validation_choices(args.tta_runs, len(args.tta_runs) > 1, both_eyes, args.target_sensitivity)
     val = choices["val"]
     cut_std = choices["cut"]
@@ -225,9 +258,10 @@ def main():
           f"(on validation: sensitivity {v_sens:.1%}, specificity {v_spec:.1%})")
 
     # 2. The external photos, scored once by every model of the system (8 views each).
-    df, n_ungradable, n_pairs = load_external(args.grades, args.pairs, args.images)
+    df, n_ungradable, n_pairs, fmt, has_dme = load_external(args.grades, args.pairs, args.images)
     print(f"External set: {len(df)} gradable photos of {df['patient'].nunique()} patients "
-          f"({n_ungradable} ungradable left out; pairing file has {n_pairs} patients)")
+          f"({fmt} grades; {n_ungradable} ungradable left out; "
+          f"{f'pairing file has {n_pairs} patients' if n_pairs else 'no pairing: one photo = one patient'})")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     workers = args.workers if args.workers is not None else min(8, os.cpu_count() or 1)
@@ -251,7 +285,7 @@ def main():
     preds = table.assign(dme=df["dme"], system_score=score, referred_standard=score >= cut_std,
                          referred_cautious=score >= cut_caution)
     preds.to_csv(os.path.join(args.out, "external_predictions.csv"), index=False)
-    results = report(df, score, cut_std, cut_caution, args.n_boot, args.seed)
+    results = report(df, score, cut_std, cut_caution, args.n_boot, args.seed, has_dme)
     results.update({"system": args.tta_runs, "runs": [os.path.abspath(r) for r in runs], "both_eyes_w": choices["w"],
                     "n_ungradable_excluded": n_ungradable, "grades": os.path.abspath(args.grades),
                     "images": os.path.abspath(args.images)})

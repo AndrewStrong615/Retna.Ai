@@ -69,6 +69,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   (`image_id, adjudicated_dr_grade, adjudicated_dme, adjudicated_gradable`; ungradable photos left out) and the
   pairing file (`left;right`, one row per patient: the patient comes from it, not from the file name). Refuses a
   second scoring into the same `--out`, and photos preprocessed differently from the runs' training photos.
+  Grade formats are detected from the columns: Messidor-2, APTOS (`id_code,diagnosis`) or plain (`image,level`).
+  `--pairs` is optional: without it (APTOS) each photo is its own patient and the both-eyes blend is OFF, with
+  the cutoffs then chosen on unblended validation scores (the Messidor-2 path is byte-identical to before).
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -477,6 +480,23 @@ Readouts: (1) EyePACS validation, paired vs exp14 (`analyze.py runs\exp14 runs\e
 be NOT WORSE (95% range lower bound > -0.007), it throws away ~3,900 sick DDR photos; (2) the real question (does the
 shift shrink?) can only be answered on a NEW external set never used before (e.g. IDRiD or APTOS, chosen and frozen
 before scoring S14 and S15 on it once each). Messidor-2 must not be used to judge exp15.
+
+## APTOS 2019 external check of exp15 (plan fixed BEFORE any APTOS photo is downloaded or scored)
+
+Data: APTOS 2019 Blindness Detection (Kaggle; Aravind Eye Hospital, India), its TRAIN set only: 3,662 photos with
+DR grades 0-4 (`trainLabels19.csv`, columns id_code,diagnosis, from the labels mirror; the photos from the official
+competition `train_images`, not resized copies). Known grade mix ~49/10/27/5/8% (~41% referable). TEST ONLY, never
+trained on, never used to choose anything; kept in `%USERPROFILE%\retina-data\aptos`, never in the repo; follow the
+competition's rules. No patient/eye information, so no both-eyes blend; each photo is its own patient.
+Systems (each scored ONCE, single model + 8-view TTA, no both-eyes, cutoffs from EyePACS validation):
+- S14 = exp14_tta (all of DDR); S15 = exp15_tta (DDR balanced to EyePACS's referable share).
+Primary readout: specificity at the standard cutoff and share of photos referred (the shift), read together with
+sensitivity. Prediction: S15 shows the smaller shift (higher specificity at similar sensitivity). If S15 is no better,
+the source/prevalence explanation of the Messidor-2 shift is weakened. Secondary: AUC (ranking).
+Steps: (1) check counts only (3,662 labels, all photos present; no scoring); (2) `preprocess.py --src
+...\aptos\train_images --dst ...\aptos\processed_512_enhanced_tight --size 512 --enhance --tight-mask`; (3)
+`external_test.py` once for exp14_tta (`--out runs\aptos_s14`) and once for exp15_tta (`--out runs\aptos_s15`);
+(4) record the numbers here, whatever they are. Do not run check_labels.py on APTOS: that would be an extra look.
 
 ## Working with me
 
