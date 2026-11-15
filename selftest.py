@@ -211,6 +211,38 @@ def test_end_to_end(tmp):
     check("tta: analyze.py reads its output (both eyes + final test)",
           code_a == 0 and "TEST SET, evaluated once" in log_a)
 
+    # tta.py --eval-size: scores at another size into its own folder, records the size, and the
+    # test pass refuses a size other than the one the validation cutoff was chosen at.
+    tta_s = os.path.join(tmp, "run_ordinal_tta_s112")
+    s_args = ["tta.py", "--run", run_o, "--images", processed, "--workers", "0", "--out", tta_s]
+    code_s, log_s = run(s_args + ["--eval-size", "112"])
+    size_ok = code_s == 0 and json.load(open(os.path.join(tta_s, "tta.json")))["eval_size"] == 112
+    code_s2, _ = run(s_args + ["--split", "test", "--eval-size", "96"])
+    code_s3, _ = run(s_args + ["--split", "test"])
+    check("tta --eval-size: own size recorded, test pass must reuse it",
+          size_ok and code_s2 != 0 and code_s3 == 0, log_s.strip().splitlines()[-1] if log_s else "")
+
+    # --ema: the average follows d * avg + (1 - d) * live (d growing from small at the start),
+    # and a run with it saves the averaged network plus the live network's best epoch.
+    from train import WeightAverage
+    live = torch.nn.Linear(2, 1)
+    avg = WeightAverage([live], 0.5)
+    start = live.weight.detach().clone()
+    with torch.no_grad():
+        live.weight.add_(1.0)
+    avg.update([live])                                 # n = 1: d = min(0.5, 2/11) = 2/11
+    want = start * 2 / 11 + live.weight.detach() * 9 / 11
+    check("ema: one update gives d * average + (1 - d) * live, d = min(decay, (1+n)/(10+n))",
+          torch.allclose(avg.copies[0].weight, want))
+    out = os.path.join(tmp, "run_ema")
+    code, log = run(["train.py", "--labels", labels, "--images", processed, "--size", "96", "--epochs", "2",
+                     "--batch", "8", "--workers", "0", "--ema", "0.99", "--out", out])
+    code_a, log_a = run(["analyze.py", os.path.join(out, "live"), out, "--n-boot", "50"]) if code == 0 else (1, "")
+    ema_ok = code == 0 and torch.load(os.path.join(out, "best.pt"), weights_only=True)["ema"] == 0.99
+    check("train.py --ema runs, saves the average, and analyze.py pairs it with the live weights",
+          ema_ok and code_a == 0 and "val_auc_live" in json.load(open(os.path.join(out, "history.json")))[0],
+          log.strip().splitlines()[-1] if log else "")
+
     # Stage 2: pretraining leaves out validation/test patients, and train.py --init uses its encoder.
     pre = os.path.join(tmp, "pre")
     code, log = run(["pretrain.py", "--images", processed, "--exclude-labels", labels, "--size", "96",

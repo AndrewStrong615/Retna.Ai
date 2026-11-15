@@ -29,6 +29,19 @@ The output folder looks like a run to analyze.py, so --both-eyes, --ensemble and
 Usage:
   python tta.py --run runs\\exp10 --images %USERPROFILE%\\retina-data\\processed_512_enhanced_tight
   (writes runs\\exp10_tta; ~2-3 min for the 5,268 validation eyes on the laptop GPU)
+
+Scoring size (--eval-size, the "train-test resolution" check):
+  Training crops a random 85-100% of each photo's area and stretches it back to 512 px
+  (RandomResizedCrop in data.py), so during training every lesion looks 0-8% bigger
+  than it really is, about 4% on average. Scoring resizes the whole photo to 512 px, so
+  lesions look a little SMALLER at scoring time than the model is used to. Scoring the
+  same photos a little larger (e.g. 544 px) can undo that mismatch with the SAME weights
+  (Touvron et al. 2019, "Fixing the train-test resolution discrepancy"). The network ends in
+  global pooling, so it accepts any input size. Example:
+    python tta.py --run runs\\exp12 --images ... --eval-size 544      (writes runs\\exp12_tta_s544)
+  Compare it with the plain-size TTA folder on validation:
+    python analyze.py runs\\exp12_tta runs\\exp12_tta_s544
+  The size is stored in tta.json; the test pass and external_test.py reuse it.
 """
 
 import argparse
@@ -94,8 +107,18 @@ def main():
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--workers", type=int, default=None, help="image-loading helpers (default: up to 8)")
     p.add_argument("--target-sensitivity", type=float, default=0.90)
+    p.add_argument("--eval-size", type=int, default=None,
+                   help="score the photos resized to this many pixels (default: the run's training size); "
+                        "see 'Scoring size' in the docstring")
     args = p.parse_args()
-    out_dir = args.out or args.run.rstrip("/\\") + "_tta"
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_amp = device.type == "cuda"
+    ckpt = torch.load(os.path.join(args.run, "best.pt"), map_location=device)
+    eval_size = args.eval_size or ckpt["size"]
+    # A different scoring size is a different system, so it gets its own folder by default.
+    default_out = args.run.rstrip("/\\") + ("_tta" if eval_size == ckpt["size"] else f"_tta_s{eval_size}")
+    out_dir = args.out or default_out
     os.makedirs(out_dir, exist_ok=True)
     val_out, test_out = (os.path.join(out_dir, f"{s}_predictions.csv") for s in ("val", "test"))
     info_path = os.path.join(out_dir, "tta.json")
@@ -109,15 +132,19 @@ def main():
             raise SystemExit(f"Run --split val first: the cutoff must be chosen on validation ({info_path} missing).")
         if os.path.exists(test_out):
             raise SystemExit(f"{test_out} exists: the test eyes were already scored once.")
+        # The test eyes must be scored exactly as the validation eyes were (folders made
+        # before --eval-size existed have no "eval_size": they used the training size).
+        with open(info_path) as f:
+            val_size = json.load(f).get("eval_size", ckpt["size"])
+        if args.eval_size and args.eval_size != val_size:
+            raise SystemExit(f"{out_dir} chose its cutoff at {val_size} px; the test eyes must use the same size.")
+        eval_size = val_size
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    use_amp = device.type == "cuda"
-    ckpt = torch.load(os.path.join(args.run, "best.pt"), map_location=device)
     arch = ckpt.get("arch", {})
     model = build_model(depth=arch.get("depth", 18), pool=arch.get("pool", "avg"),
                         dropout=arch.get("dropout", 0.2)).to(device)
     model.load_state_dict(ckpt["model"])
-    _, eval_tf = make_transforms(ckpt["size"], ckpt["mean"], ckpt["std"])   # the run's own normalization
+    _, eval_tf = make_transforms(eval_size, ckpt["mean"], ckpt["std"])   # the run's own normalization
 
     # The exact eyes (and order) the run scored, read from its own predictions file.
     # Only image/patient/level are used; the run's scores are not.
@@ -127,7 +154,7 @@ def main():
     loader = DataLoader(FundusDataset(eyes, args.images, eval_tf), batch_size=args.batch,
                         num_workers=workers, pin_memory=use_amp)
     print(f"Device: {device} | model from {args.run} (epoch {ckpt['epoch']}) | "
-          f"{len(eyes)} {args.split} eyes x 8 orientations")
+          f"{len(eyes)} {args.split} eyes x 8 orientations at {eval_size} px (trained at {ckpt['size']})")
     start = time.time()
     plain, tta = score_eyes(model, loader, device, use_amp)
     print(f"Scored in {(time.time() - start) / 60:.1f} min")
@@ -139,11 +166,18 @@ def main():
         a_plain, a_tta = safe_auc(sick, plain), safe_auc(sick, tta)
         sens, spec = sens_spec(sick, tta, threshold)
         write_json(info_path, {"run": os.path.abspath(args.run), "images": os.path.abspath(args.images),
-                               "views": 8, "threshold": threshold, "val_auc_plain": a_plain,
-                               "val_auc_tta": a_tta, "target_sensitivity": args.target_sensitivity})
-        # Self-check: view 1 is exactly what train.py scored, so its AUC should match the run's
-        # best val AUC (tiny differences on the GPU come from mixed precision).
-        print(f"  check: plain view AUC {a_plain:.4f} (run's own best val AUC {ckpt['val_auc']:.4f})")
+                               "views": 8, "eval_size": eval_size, "threshold": threshold,
+                               "val_auc_plain": a_plain, "val_auc_tta": a_tta,
+                               "target_sensitivity": args.target_sensitivity})
+        if eval_size == ckpt["size"]:
+            # Self-check: view 1 is exactly what train.py scored, so its AUC should match the run's
+            # best val AUC (tiny differences on the GPU come from mixed precision).
+            print(f"  check: plain view AUC {a_plain:.4f} (run's own best val AUC {ckpt['val_auc']:.4f})")
+        else:
+            # At another size view 1 is no longer what train.py scored, so this is the size
+            # effect alone (no TTA): compare it with the run's own best val AUC.
+            print(f"  plain view at {eval_size} px: AUC {a_plain:.4f} "
+                  f"(at {ckpt['size']} px: {ckpt['val_auc']:.4f}, {a_plain - ckpt['val_auc']:+.4f})")
         print(f"  validation AUC with 8-view TTA: {a_tta:.4f} ({a_tta - a_plain:+.4f}) | "
               f"sensitivity {sens:.1%}, specificity {spec:.1%}")
         print(f"\nWrote {val_out}. Compare on validation:\n"

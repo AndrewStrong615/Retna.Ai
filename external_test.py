@@ -266,14 +266,21 @@ def main():
     use_amp = device.type == "cuda"
     workers = args.workers if args.workers is not None else min(8, os.cpu_count() or 1)
     table = df[["image", "patient", "level"]].copy()
-    for i, run in enumerate(runs):
+    for i, (tta_dir, run) in enumerate(zip(args.tta_runs, runs)):
         check_recipe(run, args.images)
         ckpt = torch.load(os.path.join(run, "best.pt"), map_location=device)
         arch = ckpt.get("arch", {})
         model = build_model(depth=arch.get("depth", 18), pool=arch.get("pool", "avg"),
                             dropout=arch.get("dropout", 0.2)).to(device)
         model.load_state_dict(ckpt["model"])
-        _, eval_tf = make_transforms(ckpt["size"], ckpt["mean"], ckpt["std"])   # the run's own normalization
+        # Score at the size the TTA folder chose its cutoff at (tta.py --eval-size); folders
+        # made before that option have no "eval_size" and used the training size.
+        info_path = os.path.join(tta_dir, "tta.json")
+        eval_size = ckpt["size"]
+        if os.path.exists(info_path):
+            with open(info_path) as f:
+                eval_size = json.load(f).get("eval_size", ckpt["size"])
+        _, eval_tf = make_transforms(eval_size, ckpt["mean"], ckpt["std"])   # the run's own normalization
         loader = DataLoader(FundusDataset(df, args.images, eval_tf), batch_size=args.batch,
                             num_workers=workers, pin_memory=use_amp)
         _, table[f"score_{i}"] = score_eyes(model, loader, device, use_amp)

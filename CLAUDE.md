@@ -46,6 +46,11 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   (`extra`) and `extra_split.csv`. Without the flags, training is bit-identical to before (checked on CPU).
   Several extra datasets at once: `--extra-labels A.csv B.csv --extra-images dirA dirB` (same order); with one
   extra dataset the training table is identical to before (checked on CPU against the old code's run).
+  `--ema D` (e.g. 0.9998; 0 = off, the old code path): a running average of the weights (hand-written
+  `WeightAverage`, BatchNorm statistics and the loss's cutpoints included) is what gets validated, saved as best.pt
+  and tested; training itself is unchanged. The live weights are validated too (`val_auc_live` in history.json)
+  and their best epoch is written to `<out>/live/val_predictions.csv`, so `analyze.py <out>/live <out>` compares
+  averaged vs live within ONE run (no seed noise).
 - `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
   `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate
   names and grades outside 0-5. All of DDR is training data (our validation/test stay pure EyePACS).
@@ -58,7 +63,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `tta.py`: test-time augmentation for a finished run: scores each eye in the 8 exact orientations of a square
   (flips, 90/180/270 turns) and averages. Writes a run-like folder (`<run>_tta`) that analyze.py reads unchanged.
   Validation first (new 90%-sensitivity cutoff chosen there); `--split test` only once, after deciding; refuses
-  to redo either. Its self-check: view 1 reproduces the run's own val AUC.
+  to redo either. Its self-check: view 1 reproduces the run's own val AUC. `--eval-size N` scores the photos
+  resized to N px instead of the training size (same weights; default folder `<run>_tta_s<N>`); the size is stored
+  in tta.json, and the test pass and `external_test.py` reuse it (folders without it used the training size).
 - `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
   of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
   labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
@@ -497,6 +504,45 @@ Steps: (1) check counts only (3,662 labels, all photos present; no scoring); (2)
 ...\aptos\train_images --dst ...\aptos\processed_512_enhanced_tight --size 512 --enhance --tight-mask`; (3)
 `external_test.py` once for exp14_tta (`--out runs\aptos_s14`) and once for exp15_tta (`--out runs\aptos_s15`);
 (4) record the numbers here, whatever they are. Do not run check_labels.py on APTOS: that would be an extra look.
+
+## Scoring-size check (plan fixed BEFORE any photo is scored at another size; validation only)
+
+Why: training crops a random 85-100% of each photo's area and stretches it to 512 px (`RandomResizedCrop` in
+data.py), so lesions look 0-8% bigger in training (~4% on average) than at scoring time, when the whole photo is
+resized to 512. Scoring slightly larger (upsampling the 512 px files) may undo that mismatch with the SAME weights
+(Touvron et al. 2019, FixRes). Like TTA, no training and no seed noise: only check 1 (paired range) applies.
+Models: exp12, exp12b, exp14 (their 512 px `_tta` folders are the baselines, already scored). Sizes: 544 and 576
+only (544 ~ the average training zoom, 576 brackets it from above). `tta.py --run runs\expN --images ... --eval-size S`
+(validation only), then `analyze.py runs\expN_tta runs\expN_tta_sS`.
+Rule: a size joins the standard tricks only if its paired gain over 512 has a 95% range above 0 for ALL three models;
+if both sizes pass, take the larger average gain. Choosing between 2 sizes on validation adds a little optimism, so
+expect a small part of the gain to shrink on new eyes. The pre-registered APTOS check stays at 512 px either way
+(its plan was fixed before this), and no test set or external set is scored for this check.
+
+Results (validation, 8-view TTA, paired vs the same model at 512 px; spec at the 90%-sensitivity cutoff):
+
+| Model | 512 px | 544 px: B - A [95% range] | 576 px: B - A [95% range] | Plain view only, 512 -> 544 |
+|---|---|---|---|---|
+| exp12 | 0.9293 / 74.3% | +0.0004 [-0.002, +0.003], 77.8% | -0.0000 [-0.004, +0.003], 77.9% | +0.0017 |
+| exp12b | 0.9327 / 76.6% | +0.0016 [-0.001, +0.004], 76.5% | +0.0012 [-0.003, +0.005], 78.5% | +0.0016 |
+| exp14 | 0.9320 / 76.8% | +0.0026 [0.000, +0.005], 78.1% | +0.0009 [-0.002, +0.004], 78.4% | +0.0024 |
+
+VERDICT under the rule: NEITHER size joins (544 passes check 1 on one model of three, 576 on none). The direction
+is consistent but small: 544 beats 512 on all three models (mean +0.0015 with TTA, +0.0019 for the plain view),
+and 576 is smaller again, so the mismatch is real but near 544 and worth only ~0.002 AUC. TTA already removes
+part of it (TTA gains shrink at 544). Kept as an option (`--eval-size`), not a standard trick; it could be
+bundled with another small change later, never chosen again on these validation eyes alone.
+
+## exp16 plan: weight averaging (--ema), fixed BEFORE the run
+
+exp16 = exp15 + `--ema 0.9998` (average over ~5,000 updates, ~2 epochs): ONE change. Why: in the last 15 epochs
+of exp12/exp13/exp15 val AUC still jumps 0.003-0.005 epoch to epoch, so the best epoch is partly a lucky pick;
+averaged weights usually land in a flatter, steadier spot. Cost: one extra validation pass per epoch (~+20 s).
+Readouts: (1) DECIDES: averaged vs live weights of the SAME run (`analyze.py runs\exp16\live runs\exp16`): EMA
+joins the recipe if the 95% range is above 0 (check 1; no seed noise, training was identical; both best epochs are
+picked on validation, and the jumpier live curve gets MORE max-of-noise optimism, so this is conservative for EMA).
+(2) Sanity: exp16 vs exp15 (`--noise-floor 0.007`) must be NOT WORSE. Also watch: the averaged curve should be
+smoother than the live one in history.json (`val_auc` vs `val_auc_live`).
 
 ## Working with me
 
