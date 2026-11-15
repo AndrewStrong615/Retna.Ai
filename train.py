@@ -23,6 +23,7 @@ that already holds results, unless you pass --overwrite.
 """
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -44,7 +45,8 @@ from model import build_model
 REFERABLE_FROM = 2          # grade 2 (moderate) or worse = refer to a specialist
 NUM_GRADES = 5              # EyePACS grades 0..4
 RESULT_FILES = ["config.json", "history.json", "best.pt", "val_predictions.csv",
-                "test_predictions.csv", "test_results.json"]
+                "test_predictions.csv", "test_results.json",
+                os.path.join("live", "val_predictions.csv")]     # only with --ema
 
 
 # ---------------------------------------------------------------- small helpers
@@ -223,6 +225,51 @@ class BinaryLoss(nn.Module):
         return torch.sigmoid(score)
 
 
+class WeightAverage:
+    """
+    A running average of the weights (EMA, "exponential moving average"), for --ema.
+
+    Late in training the validation AUC still jumps by 0.003-0.005 from one epoch to
+    the next, because the last few hundred updates push the weights a little this way
+    or that. The average below follows the weights slowly, so those last pushes mostly
+    cancel out, and the averaged network usually sits in a flatter, more reliable
+    spot than any single moment of training. It never changes how training itself
+    goes: it only watches, and is what gets validated and saved.
+
+    After every weight update:  average = d * average + (1 - d) * current weights.
+    With d = 0.9998 the average remembers roughly the last 1 / (1 - d) = 5,000 updates
+    (~2 epochs at ~2,700 updates per epoch). At the very start the network is random and
+    changes fast, so d starts small and grows: d = min(decay, (1 + n) / (10 + n)) after
+    n updates (otherwise the average would drag the random starting weights along for
+    thousands of updates).
+
+    BatchNorm's running mean/variance are averaged too (they belong to the weights the
+    average network uses); the integer update counter inside BatchNorm is just copied.
+    The ordinal loss's learned cutpoints are averaged as well, so P(referable) of the
+    averaged network uses matching cutpoints.
+    """
+
+    def __init__(self, modules, decay):
+        self.decay = decay
+        self.updates = 0
+        self.copies = [copy.deepcopy(m) for m in modules]
+        for c in self.copies:
+            c.requires_grad_(False)             # the average is never trained directly
+
+    @torch.no_grad()
+    def update(self, modules):
+        self.updates += 1
+        d = min(self.decay, (1 + self.updates) / (10 + self.updates))
+        for live, avg in zip(modules, self.copies):
+            # state_dict() hands out the module's own tensors, so changing them in place
+            # changes the averaged network itself. Same module type -> same order.
+            for a, b in zip(avg.state_dict().values(), live.state_dict().values()):
+                if a.is_floating_point():
+                    a.lerp_(b, 1 - d)           # a + (1 - d) * (b - a) = d * a + (1 - d) * b
+                else:
+                    a.copy_(b)
+
+
 @torch.no_grad()
 def no_skill_loss(loss_fn, train_grades, device):
     """
@@ -332,6 +379,9 @@ def main():
                    help="start from a self-pretrained encoder (pretrain.py's encoder.pt) instead of random weights")
     p.add_argument("--dropout", type=float, default=0.2,
                    help="share of features randomly dropped before the head during training")
+    p.add_argument("--ema", type=float, default=0.0,
+                   help="validate and save a running average of the weights with this decay, e.g. 0.9998 "
+                        "(0 = off, the old behavior). The live weights are validated too, for comparison")
     p.add_argument("--channels-last", type=int, choices=[0, 1], default=0,
                    help="GPU only: alternative memory layout (slower on the RTX 5060; see bench.py)")
     p.add_argument("--cudnn-benchmark", type=int, choices=[0, 1], default=1,
@@ -349,6 +399,8 @@ def main():
     args = p.parse_args()
     if args.accum < 1 or args.batch % args.accum:
         raise SystemExit(f"--batch {args.batch} must split evenly into --accum {args.accum} pieces.")
+    if not 0 <= args.ema < 1:
+        raise SystemExit(f"--ema {args.ema} must be 0 (off) or a decay below 1, e.g. 0.9998.")
 
     # Never mix two runs' files in one folder: a leftover test_results.json or
     # best.pt from an earlier run could be mistaken for this run's.
@@ -545,9 +597,17 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
+    # --ema: the network that is validated, saved as best.pt and tested is the running
+    # average of the weights (see WeightAverage); without it, the live network as before.
+    ema = WeightAverage([model, loss_fn], args.ema) if args.ema else None
+    eval_model, eval_loss = ema.copies if ema else (model, loss_fn)
+
     # ---------------- Training loop ----------------
     best_auc, history, blew_up = -1.0, [], False
     best_val_scores, best_thr = None, None
+    # With --ema the live weights are validated too, and their best epoch is kept, so one
+    # run answers "did averaging help?" on the same training run: no seed noise in between.
+    best_live_auc, best_live_scores, best_live_thr, best_live_epoch = -1.0, None, None, None
     for epoch in range(1, args.epochs + 1):
         model.train()
         t0 = time.time()
@@ -577,6 +637,8 @@ def main():
                 scaler.step(optimizer)                     # 4. nudge every weight downhill
                 scaler.update()
                 scheduler.step()
+                if ema:
+                    ema.update([model, loss_fn])           # 5. the average follows slowly
             # .item() waits for the GPU to finish this step. That also keeps the
             # "waiting for data" timer honest; if you ever remove it, put
             # torch.cuda.synchronize() here instead.
@@ -591,7 +653,7 @@ def main():
             t_ready = time.time()
         train_seconds = time.time() - t0
 
-        val_loss, val_scores, val_grades = evaluate(model, val_loader, loss_fn, device,
+        val_loss, val_scores, val_grades = evaluate(eval_model, val_loader, eval_loss, device,
                                                     use_amp, memory_format)
         if not np.isfinite(val_scores).all():
             bad = nonfinite_tensors(model)
@@ -618,6 +680,15 @@ def main():
                                             for k in np.unique(val_grades)})
         msg = (f"epoch {epoch:3d} | train loss {train_loss:.4f} ({train_loss / no_skill:.0%} "
                f"of no-skill) | val loss {val_loss:.4f} | val AUC {val_auc:.4f}")
+        if ema:
+            # The live weights, for comparison (costs one more validation pass per epoch).
+            _, live_scores, _ = evaluate(model, val_loader, loss_fn, device, use_amp, memory_format)
+            live_auc = safe_auc(val_labels, live_scores)
+            row["val_auc_live"] = live_auc
+            msg += f" (averaged; live weights {live_auc:.4f})"
+            if not math.isnan(live_auc) and live_auc > best_live_auc:
+                best_live_auc, best_live_scores, best_live_epoch = live_auc, live_scores.copy(), epoch
+                best_live_thr = pick_threshold(val_labels, live_scores, args.target_sensitivity)
         if not math.isnan(val_auc):
             thr = pick_threshold(val_labels, val_scores, args.target_sensitivity)
             sens, spec = sens_spec(val_labels, val_scores, thr)
@@ -637,11 +708,11 @@ def main():
 
         if not math.isnan(val_auc) and val_auc > best_auc:
             best_auc = val_auc
-            torch.save({"model": model.state_dict(), "loss": loss_fn.state_dict(),
+            torch.save({"model": eval_model.state_dict(), "loss": eval_loss.state_dict(),
                         **to_py({"target": args.target, "pos_weight": args.pos_weight, "arch": arch,
                                  "mean": mean, "std": std, "size": args.size,
                                  "background": background, "threshold": thr,
-                                 "epoch": epoch, "val_auc": val_auc})},
+                                 "epoch": epoch, "val_auc": val_auc, "ema": args.ema})},
                        f"{args.out}/best.pt")
             # Keep the exact validation scores this epoch's cutoff was picked
             # on; they are written to val_predictions.csv after training.
@@ -665,7 +736,17 @@ def main():
             print("No checkpoint was saved (validation set needs both classes). Use more data.")
         return
     save_predictions(f"{args.out}/val_predictions.csv", val_df, best_val_scores, best_thr,
-                     loss_fn, device)
+                     eval_loss, device)
+    if ema and best_live_scores is not None:
+        # The live weights' best epoch, as a run-like folder analyze.py can read, so the
+        # averaged and live networks of THIS run can be compared paired on validation.
+        # (Its prob_referable column uses the live cutpoints of the last epoch, not of its
+        # best one; score and referred are exact.)
+        os.makedirs(f"{args.out}/live", exist_ok=True)
+        save_predictions(f"{args.out}/live/val_predictions.csv", val_df, best_live_scores,
+                         best_live_thr, loss_fn, device)
+        print(f"\nLive weights: best val AUC {best_live_auc:.4f} (epoch {best_live_epoch}); "
+              f"averaged: {best_auc:.4f}. Compare: python analyze.py {args.out}/live {args.out}")
 
     # Stop the training and validation helper processes before testing, so
     # their memory is free; the test loader starts its own (fewer) helpers.
