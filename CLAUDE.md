@@ -505,6 +505,31 @@ Steps: (1) check counts only (3,662 labels, all photos present; no scoring); (2)
 `external_test.py` once for exp14_tta (`--out runs\aptos_s14`) and once for exp15_tta (`--out runs\aptos_s15`);
 (4) record the numbers here, whatever they are. Do not run check_labels.py on APTOS: that would be an extra look.
 
+Results (each system scored ONCE; `runs\aptos_s14`, `runs\aptos_s15`). Deviation from the plan: the grades came from the
+competition's own `train.csv` (same columns `id_code,diagnosis`, 3,662 rows), not the labels mirror's `trainLabels19.csv`.
+Counts checked first: 3,662 labels, 3,662 unique ids, all photos present; preprocessed with 0 failures. 1,487 referable
+(40.6%). exp15's TTA on validation (made for this check): 0.9299 -> 0.9316 (+0.0016). No both-eyes (no pairing).
+
+| APTOS 2019 (external), single model + TTA | AUC | Sens (standard) | Spec (standard) | Referred | Grade 0 referred | Grade 1 referred |
+|---|---|---|---|---|---|---|
+| S14 (exp14, all of DDR) | 0.965 [0.960-0.970] | 100.0% | 65.2% [63.2-67.2%] | 61.3% | 21.6% | 99.5% |
+| S15 (exp15, DDR balanced) | **0.973** [0.969-0.978] | 100.0% | **72.0%** [70.1-73.9%] | 57.2% | 13.4% | 99.2% |
+
+(Cautious cutoff: S14 100.0% / 62.2%; S15 100.0% / 70.3%. Cutoffs from EyePACS validation: S14 standard -0.0918,
+S15 -0.0744.)
+PREDICTION CONFIRMED: S15 shows the smaller shift: +6.8 points of specificity at the same (100%) sensitivity, the 95%
+ranges do not overlap, 4 points fewer photos referred, and grade-0 false alarms nearly halved (21.6% -> 13.4%). This
+supports the source/prevalence-shortcut explanation of the Messidor-2 shift (generated there, confirmed here on an
+untouched set). Ranking also improved (+0.008 AUC, secondary). The shift itself is NOT gone: the EyePACS cutoff still
+catches 100% of sick APTOS photos, so scores still run high on new cameras.
+Where the remaining false alarms come from: almost all APTOS "mild" (grade 1) photos are referred (99%) by BOTH
+systems, ~60% of S15's false alarms. Grade 0 alone: specificity 86.6% (S15), close to EyePACS. Likely a grading-
+convention difference (as seen in DDR's check, where mild eyes scored near 0, far above EyePACS's mild) plus the shift,
+not something to tune away on APTOS.
+Caveats: APTOS has no patient IDs, so both eyes of one person count as two "patients" (ranges a little too narrow), and
+APTOS is known to contain near-duplicate photos. APTOS is now USED by 2 systems: never rescore it to choose anything.
+It chose nothing here: the exp15 recipe was already the base of exp16 before APTOS was scored.
+
 ## Scoring-size check (plan fixed BEFORE any photo is scored at another size; validation only)
 
 Why: training crops a random 85-100% of each photo's area and stretches it to 512 px (`RandomResizedCrop` in
