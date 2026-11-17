@@ -575,6 +575,65 @@ EMA does NOT join the recipe (the option stays in train.py, off by default). (2)
 by the end, because the cosine schedule's last epochs already average out the noise. Base recipe stays exp15.
 Test (recorded, not used): 0.926 / 90.2% / 74.6% (exp15: 0.918 / 89.6% / 76.4%).
 
+## exp17 + IDRiD plan: camera-robust augmentation, fixed BEFORE any IDRiD photo is downloaded or scored
+
+Why: every external set so far (Messidor-2, APTOS) ranks well (AUC 0.95-0.97) but scores run HIGH on new cameras,
+so the EyePACS cutoff refers too many healthy eyes (APTOS S15: spec 72.0% at 100% sens). Balancing DDR (exp15)
+shrank the shift; the next lever is teaching the model to ignore camera differences: sharpness, compression,
+noise, residual colour and contrast. Messidor-2 and APTOS are used, so judging this needs a NEW untouched set.
+
+External set: IDRiD (Porwal et al. 2018; Eye Clinic, Nanded, India; one camera, Kowa VX-10 alpha, 4288x2848 px),
+"B. Disease Grading": 516 photos (413 train + 103 test folders; BOTH are used as external test, NEVER trained on),
+DR grade 0-4 and DME risk 0-2 per photo. Licence: CC BY 4.0 (IEEE DataPort DOI 10.21227/H25W98; free IEEE
+login, the user downloads it); cite Porwal et al. Kept in `%USERPROFILE%\retina-data\idrid`, never in the repo.
+No patient or eye information: each photo is its own patient, no both-eyes blend (as APTOS).
+Expected size (from the dataset paper, checked in step 1): ~323 referable (~63%), ~193 not referable, only ~25 grade 1.
+So specificity rests on ~193 photos: a 95% range of about +-6 points for one system. Two systems compared
+UNPAIRED would need ~13 points to separate; hence the paired comparison below (same photos, resampled together).
+
+The change, exp17 = exp15 + `--aug strong` (ONE switch, a bundle; its parts are NOT tested one by one, so no
+extra looks at validation or IDRiD). Built in `data.py`, hand-written where torchvision has no transform, applied
+to the training photos only, after the existing geometric steps:
+- ColorJitter brightness 0.4, contrast 0.4, saturation 0.3, hue 0.02 (now 0.2 / 0.2 / 0.1 / 0).
+- Random gamma 0.7-1.4 (p 0.5): different camera exposure curves.
+- Gaussian blur, sigma 0.1-1.5 (p 0.3): softer optics, slight defocus.
+- Down-then-up resize to 50-100% of the size (p 0.3): lower-resolution cameras.
+- JPEG re-compression, quality 30-90 (p 0.3): APTOS and Messidor-2 .jpg photos vs EyePACS's.
+`--aug standard` (default) must stay bit-identical to today (checked on CPU, as for --ema/--accum); selftest.py
+gets a 2-epoch `--aug strong` run. Speed: `bench.py` before the run (blur/JPEG cost CPU; data waits are ~1% now).
+Caveat stated now: training photos are `--enhance`d (local average colour subtracted), which already removes much
+of the colour/illumination difference, so the expected gain is from sharpness/compression/noise more than colour.
+
+Steps (in order):
+(1) Code: `--aug strong`, selftest, bit-identity check of `--aug standard`, bench. PR, merged before the run.
+(2) `compare_external.py A B`: a small paired comparison of two `external_test.py` folders scored on the SAME photos
+    (patient bootstrap of the differences in AUC, sensitivity and specificity at each system's own standard cutoff).
+    Self-check before IDRiD: on `runs\aptos_s14` vs `runs\aptos_s15` it must reproduce each folder's own
+    external_results.json numbers (APTOS is used: this re-reads finished outputs and chooses nothing).
+(3) Train exp17 (~10-11 h). Readout A, EyePACS validation: `analyze.py runs\exp15 runs\exp17 --noise-floor 0.007`;
+    must be NOT WORSE (lower bound > -0.007), else stop: exp17 is not scored on IDRiD and IDRiD stays untouched.
+    Then `tta.py --run runs\exp17` (validation only).
+(4) IDRiD, only after (1)-(3): download; count check only (516 labels, all photos present, grade mix; no scoring);
+    labels to plain `image,level` with a one-line pandas command (both CSVs: "Image name", "Retinopathy grade"). If
+    the train and test folders reuse names (e.g. IDRiD_001 in both; preprocess.py refuses duplicates), prefix the
+    test photos and their labels with `test_`. Preprocess: `preprocess.py --src ...\idrid\train ...\idrid\test --dst
+    ...\idrid\processed_512_enhanced_tight --size 512 --enhance --tight-mask`; look at ~5 preprocessed photos for mask
+    problems (pictures only, no scores).
+(5) Score ONCE each: `external_test.py --tta-runs runs\exp15_tta ... --out runs\idrid_s15` and the same for
+    `runs\exp17_tta` -> `runs\idrid_s17`. Cutoffs from each run's EyePACS validation, as always.
+(6) `compare_external.py runs\idrid_s15 runs\idrid_s17`; record everything here, whatever it is.
+
+Decision rule (fixed now): `--aug strong` JOINS the recipe if (A) EyePACS validation is NOT WORSE and (B) on IDRiD the
+paired specificity difference S17 - S15 at the standard cutoff has a 95% range above 0, with S17's sensitivity still
+>= 90%. Specificity can be bought by losing sensitivity, so a gain with sensitivity below 90% does NOT count.
+If (A) passes and (B) does not, strong aug is left out (no benefit shown, and it costs CPU).
+Secondary (report only): AUC difference (ranking); share referred; grade-0 referred; spec on grade 0 only;
+AUC for "grade >= 2 or DME risk >= 1"; the target named earlier (>= 90% sens AND >= 85% spec at the EyePACS cutoff).
+Prediction stated now: S17 has the higher specificity at ~100% sensitivity; S15 lands near its APTOS numbers
+(spec ~70%), since IDRiD is another Indian clinic with a single non-EyePACS camera.
+Budget: IDRiD is then USED by exactly these 2 systems; never rescore it to choose anything. Balanced batches across
+datasets (the other camera idea) is a separate change for later and needs yet another untouched set.
+
 ## Working with me
 
 I'm learning ML through this project. Explain what you change and why, keep code well commented,
