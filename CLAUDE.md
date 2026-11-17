@@ -90,6 +90,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   Grade formats are detected from the columns: Messidor-2, APTOS (`id_code,diagnosis`) or plain (`image,level`).
   `--pairs` is optional: without it (APTOS) each photo is its own patient and the both-eyes blend is OFF, with
   the cutoffs then chosen on unblended validation scores (the Messidor-2 path is byte-identical to before).
+  `--adapt-bn` (AdaBN, off by default): the photos are split by patient into 2 halves (seed 0); each half is scored
+  by a model copy whose 20 BatchNorm layers re-measured their mean/variance on the OTHER half's images (plain view,
+  no grades, no weights trained). Recorded as `adapt_bn` in external_results.json.
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
@@ -643,8 +646,29 @@ Secondary (report only): AUC difference (ranking); share referred; grade-0 refer
 AUC for "grade >= 2 or DME risk >= 1"; the target named earlier (>= 90% sens AND >= 85% spec at the EyePACS cutoff).
 Prediction stated now: S17 has the higher specificity at ~100% sensitivity; S15 lands near its APTOS numbers
 (spec ~70%), since IDRiD is another Indian clinic with a single non-EyePACS camera.
-Budget: IDRiD is then USED by exactly these 2 systems; never rescore it to choose anything. Balanced batches across
-datasets (the other camera idea) is a separate change for later and needs yet another untouched set.
+Budget: IDRiD is then USED by exactly these 3 systems (S15, S17, S15a below); never rescore it to choose anything.
+Balanced batches across datasets (the other camera idea) is a separate change for later and needs yet another
+untouched set.
+
+### Amendment (2026-11-16, BEFORE any IDRiD photo is downloaded): a third system, S15a = exp15 + AdaBN
+
+Why: the shift may sit largely in the BatchNorm statistics. Every BatchNorm layer normalizes with a mean and variance
+measured on EyePACS photos; a new camera feeds it differently bright/contrasty features, so everything downstream (and
+the score) moves. AdaBN (Li et al. 2016, "Revisiting Batch Normalization for Practical Domain Adaptation"): re-measure
+those statistics on UNLABELED photos from the new site. No weight is trained, no grade is used. If it works, a new
+clinic would only need a few hundred photos (no grades) before going live, and the EyePACS cutoff would transfer.
+How (`external_test.py --adapt-bn`, default off = the old code path): the photos are split by patient into 2 halves
+(seed 0). For each half, a fresh copy of the model re-measures its BatchNorm statistics (plain view, cumulative
+average, dropout off) on the OTHER half's images only, then scores this half (8-view TTA as usual). So no photo is
+scored by a model whose statistics saw it. Cutoffs and the TTA scale stay exactly as fixed on EyePACS validation.
+Caveat: pooled numbers mix scores from two adapted copies (fitted on different halves); with ~258 photos per half
+the two copies should be close. Score: `external_test.py --tta-runs runs\exp15_tta --adapt-bn ... --out
+runs\idrid_s15a`, once, after S15 and S17 (step 5).
+Rule (fixed now): AdaBN is called a working deployment step if `compare_external.py runs\idrid_s15 runs\idrid_s15a`
+shows a specificity gain at the standard cutoff with a 95% range above 0 AND S15a still catches >= 90% of sick photos.
+It is NOT a training change, so EyePACS validation cannot judge it and the S17 rule above is unchanged.
+Prediction stated now: S15a has the higher specificity at a lower but still >= 90% sensitivity (scores move down).
+Not scored on IDRiD: S17 + AdaBN (a 4th look); if both work, their combination waits for another untouched set.
 
 ## Working with me
 

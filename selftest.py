@@ -456,6 +456,34 @@ def test_end_to_end(tmp):
           and code_c2 != 0 and "did not score the same photos" in log_c2,
           (log_c or log_c2).strip().splitlines()[-1] if (log_c or log_c2) else "")
 
+    # AdaBN: BatchNorm statistics become the plain average of the calibration batches' statistics,
+    # while every weight stays as it was and the model ends in evaluation mode.
+    from external_test import adapt_batchnorm, two_halves
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Conv2d(3, 4, 3), torch.nn.BatchNorm2d(4), torch.nn.ReLU(),
+                              torch.nn.Dropout(0.5))
+    weights = net[0].weight.detach().clone()
+    batches = [(torch.randn(8, 3, 10, 10) * 2 + 1, None) for _ in range(3)]
+    with torch.no_grad():
+        want = torch.stack([net[0](x).mean(dim=(0, 2, 3)) for x, _ in batches]).mean(dim=0)
+    n_bn = adapt_batchnorm(net, batches, torch.device("cpu"), False)
+    halves = two_halves(["a", "a", "b", "c", "c", "d", "e"], 0)
+    check("adabn: statistics re-measured as the batch average, weights untouched, eval mode; halves keep patients",
+          n_bn == 1 and torch.allclose(net[1].running_mean, want, atol=1e-6) and torch.equal(net[0].weight, weights)
+          and not net.training and not net[3].training
+          and halves[0] == halves[1] and halves[3] == halves[4] and set(halves) == {0, 1})
+    adabn_out = os.path.join(tmp, "external_aptos_adabn")
+    code_d, log_d = run(["external_test.py", "--tta-runs", tta_out, "--images", renamed, "--grades", aptos_csv,
+                         "--n-boot", "50", "--workers", "0", "--adapt-bn", "--out", adabn_out])
+    res_d = json.load(open(os.path.join(adabn_out, "external_results.json"))) if code_d == 0 else {}
+    plain_scores = pd.read_csv(os.path.join(tmp, "external_aptos", "external_predictions.csv"))["score_0"]
+    adabn_scores = pd.read_csv(os.path.join(adabn_out, "external_predictions.csv"))["score_0"] if code_d == 0 else None
+    code_d2, log_d2 = run(["compare_external.py", os.path.join(tmp, "external_aptos"), adabn_out, "--n-boot", "50"])
+    check("external_test.py --adapt-bn: both halves scored, recorded, scores change, compare_external pairs it",
+          code_d == 0 and log_d.count("AdaBN:") == 2 and res_d.get("adapt_bn") == {"halves": 2, "seed": 0}
+          and adabn_scores.notna().all() and not np.allclose(adabn_scores, plain_scores) and code_d2 == 0,
+          (log_d or log_d2).strip().splitlines()[-1] if (log_d or log_d2) else "")
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,
