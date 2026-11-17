@@ -39,11 +39,14 @@ APTOS 2019 (no patient pairing: leave out --pairs; each photo is its own patient
   python external_test.py --tta-runs runs\\exp15_tta
          --images %USERPROFILE%\\retina-data\\aptos\\processed_512_enhanced_tight
          --grades %USERPROFILE%\\retina-data\\aptos\\trainLabels19.csv --out runs\\aptos_s15
+--adapt-bn (AdaBN, off by default): each half of the photos (split by patient) is scored by a model copy whose
+BatchNorm statistics were re-measured on the OTHER half's images, never on its own (see adapt_batchnorm).
 If you use Messidor-2 results, cite Krause et al. (2018) and the Messidor program partners
 (see messidor_readme.txt and the ADCIS page).
 """
 
 import argparse
+import copy
 import json
 import os
 
@@ -216,6 +219,43 @@ def report(df, score, cut_std, cut_caution, n_boot, seed, has_dme=True):
     return out
 
 
+def adapt_batchnorm(model, loader, device, use_amp):
+    """
+    AdaBN (Li et al. 2016): re-measure every BatchNorm layer's mean and variance on photos
+    from the NEW site, so each layer again sees features centred and scaled the way it saw
+    them during training. A new camera makes photos brighter, softer or differently
+    coloured; that shifts these statistics layer after layer and pushes every score up or
+    down. Only the statistics change: no weight is trained and no grade is read.
+
+    Dropout and everything else stay in evaluation mode; only the BatchNorm layers measure.
+    momentum=None makes PyTorch keep a plain average over all batches instead of a running
+    blend, so every calibration photo counts the same (up to a smaller last batch).
+    Returns how many BatchNorm layers were re-measured.
+    """
+    bns = [m for m in model.modules() if isinstance(m, torch.nn.BatchNorm2d)]
+    for bn in bns:
+        bn.reset_running_stats()               # forget EyePACS's statistics
+        bn.momentum = None                     # None = cumulative average over the batches seen
+    model.eval()
+    for bn in bns:
+        bn.train()                             # in train mode BatchNorm updates its statistics
+    with torch.no_grad():                      # nothing is learned: no gradients, no optimizer
+        for x, _ in loader:
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+                model(x.to(device, non_blocking=True))
+    model.eval()                               # back to using the (new) saved statistics
+    return len(bns)
+
+
+def two_halves(patients, seed):
+    """0/1 per photo: patients shuffled with `seed`, alternately assigned, so both eyes of a
+    patient land in the same half and the halves differ in size by at most one patient."""
+    unique = np.array(sorted(set(patients)))
+    np.random.default_rng(seed).shuffle(unique)
+    half_of = {p: i % 2 for i, p in enumerate(unique)}
+    return np.array([half_of[p] for p in patients])
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--tta-runs", nargs="+", required=True,
@@ -227,6 +267,9 @@ def main():
                         "photo is its own patient and the both-eyes blend is off")
     p.add_argument("--out", required=True, help="new folder for this external result, e.g. runs/messidor2_v4")
     p.add_argument("--no-both-eyes", action="store_true", help="score each eye alone (default: blend like the system)")
+    p.add_argument("--adapt-bn", action="store_true",
+                   help="AdaBN: before scoring each half of the photos (split by patient), re-measure the "
+                        "BatchNorm statistics on the OTHER half's images (no grades used). Default off")
     p.add_argument("--target-sensitivity", type=float, default=0.90)
     p.add_argument("--n-boot", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
@@ -266,6 +309,7 @@ def main():
     use_amp = device.type == "cuda"
     workers = args.workers if args.workers is not None else min(8, os.cpu_count() or 1)
     table = df[["image", "patient", "level"]].copy()
+    half = two_halves(df["patient"], args.seed) if args.adapt_bn else None
     for i, (tta_dir, run) in enumerate(zip(args.tta_runs, runs)):
         check_recipe(run, args.images)
         ckpt = torch.load(os.path.join(run, "best.pt"), map_location=device)
@@ -281,9 +325,26 @@ def main():
             with open(info_path) as f:
                 eval_size = json.load(f).get("eval_size", ckpt["size"])
         _, eval_tf = make_transforms(eval_size, ckpt["mean"], ckpt["std"])   # the run's own normalization
-        loader = DataLoader(FundusDataset(df, args.images, eval_tf), batch_size=args.batch,
-                            num_workers=workers, pin_memory=use_amp)
-        _, table[f"score_{i}"] = score_eyes(model, loader, device, use_amp)
+        if not args.adapt_bn:
+            loader = DataLoader(FundusDataset(df, args.images, eval_tf), batch_size=args.batch,
+                                num_workers=workers, pin_memory=use_amp)
+            _, table[f"score_{i}"] = score_eyes(model, loader, device, use_amp)
+        else:
+            # Each half is scored by a copy whose statistics were measured on the OTHER half only,
+            # so no photo is scored by a model that has seen it (even without its grade).
+            scores = np.full(len(df), np.nan)
+            for h in (0, 1):
+                calib, target = df[half != h], df[half == h]
+                adapted = copy.deepcopy(model)
+                n_bn = adapt_batchnorm(adapted, DataLoader(FundusDataset(calib, args.images, eval_tf),
+                                                           batch_size=args.batch, num_workers=workers,
+                                                           pin_memory=use_amp), device, use_amp)
+                _, scores[target.index.to_numpy()] = score_eyes(
+                    adapted, DataLoader(FundusDataset(target, args.images, eval_tf), batch_size=args.batch,
+                                        num_workers=workers, pin_memory=use_amp), device, use_amp)
+                print(f"  AdaBN: {n_bn} BatchNorm layers re-measured on {len(calib)} photos, "
+                      f"then scored the other {len(target)}")
+            table[f"score_{i}"] = scores
         print(f"  scored with {run} (epoch {ckpt['epoch']}, device {device})")
     score = np.asarray(apply_choices(choices, table), dtype=np.float64)
 
@@ -295,6 +356,7 @@ def main():
     results = report(df, score, cut_std, cut_caution, args.n_boot, args.seed, has_dme)
     results.update({"system": args.tta_runs, "runs": [os.path.abspath(r) for r in runs], "both_eyes_w": choices["w"],
                     "n_ungradable_excluded": n_ungradable, "grades": os.path.abspath(args.grades),
+                    "adapt_bn": {"halves": 2, "seed": args.seed} if args.adapt_bn else False,
                     "images": os.path.abspath(args.images)})
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2, default=float)
