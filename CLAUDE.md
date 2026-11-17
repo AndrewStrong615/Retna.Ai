@@ -51,6 +51,17 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   and tested; training itself is unchanged. The live weights are validated too (`val_auc_live` in history.json)
   and their best epoch is written to `<out>/live/val_predictions.csv`, so `analyze.py <out>/live <out>` compares
   averaged vs live within ONE run (no seed noise).
+  `--aug strong` (exp17; default `standard` = the old augmentation, same random numbers): adds camera differences to
+  the training photos only: blur (p 0.3), down-up resize to 50-100% (p 0.3), colour jitter 0.4/0.4/0.3/hue 0.02,
+  gamma 0.7-1.4 (p 0.5), JPEG quality 30-90 (p 0.3). The random gamma, down-up and JPEG steps are hand-written in data.py.
+  Checked: `--aug standard` gives byte-identical val/test predictions and train losses to the old code on CPU
+  (`CUDA_VISIBLE_DEVICES=-1`, `--workers 0`, 3 synthetic epochs; on the GPU even the old code differs run to run).
+  bench.py at 512 px, 8 helpers: loading 229 img/s standard vs 151 strong (GPU alone ~175-180), so strong makes
+  loading the limit, close to exp16's real 147 img/s. If exp17 shows data waits, try `--workers 12` (16 threads).
+- `compare_external.py A B`: paired comparison of two `external_test.py` folders scored on the SAME photos (patient
+  bootstrap of the differences in AUC, sensitivity and specificity, each system at its own cutoffs). Self-check:
+  recomputes each folder's own numbers with the same resamples and refuses if they differ from its
+  external_results.json. Reads finished outputs only, so it adds no look at a set.
 - `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
   `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate
   names and grades outside 0-5. All of DDR is training data (our validation/test stay pure EyePACS).
@@ -82,7 +93,8 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
-  together, to find what limits training speed on a machine (~3-4 min; stop training first).
+  together, to find what limits training speed on a machine (~3-4 min; stop training first). `--aug strong` times
+  the exp17 augmentation.
 - `heatmap.py`: Grad-CAM written from scratch: for a finished run, colors where the model found evidence of
   disease on validation eyes (missed, false alarms, caught, cleared; refuses test images). Writes
   `<run>/heatmaps/*.png`. Each map is scaled to its own peak; the label's `peak` compares strength across eyes.

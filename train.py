@@ -368,6 +368,9 @@ def main():
                    help="rotation augmentation resampling (exp1/exp2 used nearest)")
     p.add_argument("--rotate-fill", choices=["background", "black"], default="background",
                    help="color of the corners rotation uncovers (exp1/exp2 used black)")
+    p.add_argument("--aug", choices=["standard", "strong"], default="standard",
+                   help="training augmentation: standard (as exp3-exp16) or strong (adds camera differences: "
+                        "blur, lower resolution, gamma, stronger colour jitter, JPEG; exp17)")
     # Measured with bench.py on the RTX 5060 laptop (PyTorch 2.15): channels_last made
     # training 3x SLOWER (95 vs 301 img/s), so it is off by default. It can be faster
     # on other GPUs; bench.py tells you which is better on a given machine.
@@ -451,7 +454,7 @@ def main():
     enhanced = all(abs(c - 128) <= 10 for c in background)   # --enhance leaves a gray background
     print(f"Background color outside the eye: {background}"
           f" ({'enhanced' if enhanced else 'plain'} preprocessing)")
-    train_tf, eval_tf = make_transforms(args.size, mean, std, fill, args.rotate_interp)
+    train_tf, eval_tf = make_transforms(args.size, mean, std, fill, args.rotate_interp, args.aug)
 
     # ---------------- Extra labeled photos (training only) ----------------
     # More labeled photos from another source, e.g. the published grades of the

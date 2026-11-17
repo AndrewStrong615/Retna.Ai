@@ -76,6 +76,8 @@ def main():
     p.add_argument("--size", type=int, default=384)
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--steps", type=int, default=30, help="batches to time per test")
+    p.add_argument("--aug", choices=["standard", "strong"], default="standard",
+                   help="training augmentation to time (strong adds blur/JPEG work on the CPU)")
     p.add_argument("--workers", type=int, nargs="+", default=[4, 8],
                    help="helper counts to try for loading")
     args = p.parse_args()
@@ -92,7 +94,7 @@ def main():
 
     names = sorted(f[:-4] for f in os.listdir(args.images) if f.endswith(".jpg"))
     df = pd.DataFrame({"image": names[: args.batch * (args.steps + 10) * 2], "level": 0})
-    train_tf, _ = make_transforms(args.size, [0.5] * 3, [0.25] * 3, (128, 128, 128))
+    train_tf, _ = make_transforms(args.size, [0.5] * 3, [0.25] * 3, (128, 128, 128), aug=args.aug)
     n = args.steps * args.batch
 
     # 1. GPU only: the same random batch over and over, already in place.
