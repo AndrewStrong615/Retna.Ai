@@ -243,6 +243,24 @@ def test_end_to_end(tmp):
           ema_ok and code_a == 0 and "val_auc_live" in json.load(open(os.path.join(out, "history.json")))[0],
           log.strip().splitlines()[-1] if log else "")
 
+    # --aug strong (exp17): the camera steps give valid, different pictures; a short run trains with it.
+    from data import make_transforms
+    from PIL import Image as PILImage
+    photo = PILImage.open(os.path.join(processed, sorted(f for f in os.listdir(processed) if f.endswith(".jpg"))[0]))
+    std_tf, _ = make_transforms(96, [0.5] * 3, [0.25] * 3, (128, 128, 128), aug="standard")
+    strong_tf, _ = make_transforms(96, [0.5] * 3, [0.25] * 3, (128, 128, 128), aug="strong")
+    torch.manual_seed(0)
+    views = [strong_tf(photo) for _ in range(20)]
+    check("aug strong: right shape, finite values, every view different",
+          all(v.shape == std_tf(photo).shape and torch.isfinite(v).all() for v in views)
+          and len({round(float(v.sum()), 3) for v in views}) == 20)
+    out = os.path.join(tmp, "run_aug")
+    code, log = run(["train.py", "--labels", labels, "--images", processed, "--size", "96", "--epochs", "2",
+                     "--batch", "8", "--workers", "0", "--aug", "strong", "--out", out])
+    check("train.py --aug strong runs and records it in config.json",
+          code == 0 and json.load(open(os.path.join(out, "config.json"))).get("aug") == "strong",
+          log.strip().splitlines()[-1] if log else "")
+
     # Stage 2: pretraining leaves out validation/test patients, and train.py --init uses its encoder.
     pre = os.path.join(tmp, "pre")
     code, log = run(["pretrain.py", "--images", processed, "--exclude-labels", labels, "--size", "96",
@@ -425,6 +443,18 @@ def test_end_to_end(tmp):
     check("external_test.py reads APTOS grades without pairing: one photo = one patient, no both-eyes",
           code_a == 0 and "APTOS grades" in log_a and res_a.get("n_patients") == res_a.get("n_images") == int(has_img.sum())
           and res_a.get("both_eyes_w") == 0 and "macular edema" not in log_a)
+
+    # compare_external.py: a second system on the SAME photos, compared paired; it must reproduce each
+    # folder's own numbers (same --n-boot and seed) and refuse two folders that scored different photos.
+    aptos_b = os.path.join(tmp, "external_aptos_b")
+    run(["external_test.py", "--tta-runs", tta_b, "--images", renamed, "--grades", aptos_csv,
+         "--n-boot", "50", "--workers", "0", "--out", aptos_b])
+    code_c, log_c = run(["compare_external.py", os.path.join(tmp, "external_aptos"), aptos_b, "--n-boot", "50"])
+    code_c2, log_c2 = run(["compare_external.py", ext_out, aptos_b, "--n-boot", "50"])
+    check("compare_external.py: paired, reproduces each system's own results, refuses different photo sets",
+          code_c == 0 and log_c.count("matches external_results.json") == 2 and "B - A" in log_c
+          and code_c2 != 0 and "did not score the same photos" in log_c2,
+          (log_c or log_c2).strip().splitlines()[-1] if (log_c or log_c2) else "")
 
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")

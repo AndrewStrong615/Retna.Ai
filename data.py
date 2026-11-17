@@ -9,6 +9,7 @@ Expects a CSV with two columns, like the EyePACS trainLabels.csv:
 where `level` is the diabetic retinopathy grade from 0 (none) to 4 (proliferative).
 """
 
+import io
 import random
 
 import numpy as np
@@ -87,7 +88,72 @@ def estimate_background(df, image_dir, n=50, seed=0):
     return tuple(int(v) for v in np.median(corners, axis=0).round())
 
 
-def make_transforms(size, mean, std, background=(0, 0, 0), rotate_interp="bilinear"):
+def _chance(p):
+    """True with probability p. Uses torch's random numbers (not Python's), like the
+    torchvision transforms, so every loader worker gets its own seeded stream."""
+    return torch.rand(1).item() < p
+
+
+def _uniform(low, high):
+    return low + (high - low) * torch.rand(1).item()
+
+
+class RandomGamma:
+    """
+    Another camera's exposure curve: every pixel value v (0 to 1) becomes v ** gamma.
+    gamma < 1 lifts the dark parts (a brighter-looking photo), gamma > 1 darkens them.
+    Written by hand: torchvision has adjust_gamma but no random version of it.
+    """
+
+    def __init__(self, low, high, p):
+        self.low, self.high, self.p = low, high, p
+
+    def __call__(self, img):
+        if not _chance(self.p):
+            return img
+        return transforms.functional.adjust_gamma(img, _uniform(self.low, self.high))
+
+
+class RandomDownUp:
+    """
+    A lower-resolution camera: shrink the photo to a random 50-100% of its size, then
+    stretch it back. Fine detail (tiny microaneurysms) is lost the way a cheaper
+    sensor would lose it, while the photo keeps the size the network expects.
+    """
+
+    def __init__(self, low, high, p):
+        self.low, self.high, self.p = low, high, p
+
+    def __call__(self, img):
+        if not _chance(self.p):
+            return img
+        w, h = img.size
+        f = _uniform(self.low, self.high)
+        small = img.resize((max(1, round(w * f)), max(1, round(h * f))), Image.BILINEAR)
+        return small.resize((w, h), Image.BILINEAR)
+
+
+class RandomJPEG:
+    """
+    JPEG compression at a random quality: blocky 8x8 artifacts and smeared colour, like
+    the .jpg photos of other clinics (APTOS, Messidor-2) or a photo re-saved several times.
+    Done for real (save to memory, read back), not imitated.
+    """
+
+    def __init__(self, low, high, p):
+        self.low, self.high, self.p = low, high, p
+
+    def __call__(self, img):
+        if not _chance(self.p):
+            return img
+        quality = int(torch.randint(self.low, self.high + 1, (1,)).item())
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        buf.seek(0)
+        return Image.open(buf).convert("RGB")
+
+
+def make_transforms(size, mean, std, background=(0, 0, 0), rotate_interp="bilinear", aug="standard"):
     """
     Augmentation: show the model slightly different versions of each image
     every epoch, so it learns what disease looks like instead of memorizing
@@ -95,11 +161,17 @@ def make_transforms(size, mean, std, background=(0, 0, 0), rotate_interp="biline
     eyes get photographed at different angles, flipped (left vs. right eye),
     and with different brightness and contrast.
 
+    aug="strong" (exp17) adds what differs between CAMERAS, so the model learns to
+    ignore it: softer optics (blur), lower resolution, a different exposure curve
+    (gamma), stronger colour/contrast differences and JPEG compression. The order
+    follows a camera: optics -> sensor -> colour processing -> saving the file.
+    aug="standard" is exactly the old list (same steps, same random numbers drawn).
+
     rotate_interp="nearest" and background=(0, 0, 0) reproduce exp1/exp2.
     """
     interp = {"bilinear": transforms.InterpolationMode.BILINEAR,
               "nearest": transforms.InterpolationMode.NEAREST}[rotate_interp]
-    train_tf = transforms.Compose([
+    steps = [
         transforms.RandomResizedCrop(size, scale=(0.85, 1.0), ratio=(0.95, 1.05)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
@@ -108,10 +180,21 @@ def make_transforms(size, mean, std, background=(0, 0, 0), rotate_interp="biline
         # on the CPU, so it stays available as a speed fallback).
         # fill: color for the corners the rotation uncovers (see estimate_background).
         transforms.RandomRotation(180, interpolation=interp, fill=background),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-    ])
+    ]
+    if aug == "standard":
+        steps.append(transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1))
+    elif aug == "strong":
+        steps += [
+            # kernel 9 covers about +-3 sigma at the largest sigma (1.5 px at 512 px).
+            transforms.RandomApply([transforms.GaussianBlur(9, sigma=(0.1, 1.5))], p=0.3),
+            RandomDownUp(0.5, 1.0, p=0.3),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.02),
+            RandomGamma(0.7, 1.4, p=0.5),
+            RandomJPEG(30, 90, p=0.3),
+        ]
+    else:
+        raise ValueError(f"unknown aug {aug!r}: use 'standard' or 'strong'")
+    train_tf = transforms.Compose(steps + [transforms.ToTensor(), transforms.Normalize(mean, std)])
     eval_tf = transforms.Compose([             # no randomness when measuring performance
         transforms.Resize((size, size)),
         transforms.ToTensor(),
