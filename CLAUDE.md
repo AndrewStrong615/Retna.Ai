@@ -674,7 +674,7 @@ Not scored on IDRiD: S17 + AdaBN (a 4th look); if both work, their combination w
 
 ## exp17 + IDRiD results (2026-11-18; each system scored ONCE)
 
-- Readout A (step 3): exp17 failed not-worse (see the exp17 row), so S17 was never scored; IDRiD is used by S15 and S15a only.
+- Readout A (step 3): exp17 failed not-worse (see the exp17 row), so S17 was never scored; IDRiD is used by S15 and S15a only. Deviation, stated openly: step 3's text says "IDRiD stays untouched" if exp17 fails, and the AdaBN amendment never updated that line. S15 vs S15a was run anyway (user approved 2026-11-18) because its rule and prediction were fixed before any IDRiD photo was downloaded; S17 stayed out.
 - IDRiD prep: "B. Disease Grading" zip; train 413 + test 103 photos, test names prefixed `test_`; labels -> `idrid\idrid_labels.csv`
   (image,level). Count check: 516 labels = 516 photos, grades 0:168 1:25 2:168 3:93 4:62, 323 referable. Preprocessed
   512 px enhance + tight mask, 0 failures; 5 photos looked at, masks fine. No pairing: one photo = one patient.
