@@ -44,7 +44,7 @@ from model import build_model
 
 REFERABLE_FROM = 2          # grade 2 (moderate) or worse = refer to a specialist
 NUM_GRADES = 5              # EyePACS grades 0..4
-RESULT_FILES = ["config.json", "history.json", "best.pt", "val_predictions.csv",
+RESULT_FILES = ["config.json", "history.json", "best.pt", "last.pt", "val_predictions.csv",
                 "test_predictions.csv", "test_results.json",
                 os.path.join("live", "val_predictions.csv")]     # only with --ema
 
@@ -348,6 +348,9 @@ def main():
     p.add_argument("--out", default="runs/exp1")
     p.add_argument("--overwrite", action="store_true",
                    help="replace results already in --out (otherwise the run refuses to start)")
+    p.add_argument("--resume", action="store_true",
+                   help="continue a stopped run from --out/last.pt (saved after every epoch). "
+                        "Give the SAME command as the original run, plus --resume")
     p.add_argument("--size", type=int, default=384)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch", type=int, default=32)
@@ -411,7 +414,14 @@ def main():
     # Never mix two runs' files in one folder: a leftover test_results.json or
     # best.pt from an earlier run could be mistaken for this run's.
     os.makedirs(args.out, exist_ok=True)
+    last_path = os.path.join(args.out, "last.pt")
+    if args.resume and args.overwrite:
+        raise SystemExit("--resume continues a run and --overwrite deletes it: pick one.")
+    if args.resume and not os.path.exists(last_path):
+        raise SystemExit(f"--resume: {last_path} not found, so there is nothing to continue.")
     existing = [f for f in RESULT_FILES if os.path.exists(os.path.join(args.out, f))]
+    if args.resume:
+        existing = []                             # this run's own files: keep them
     if existing and not args.overwrite:
         raise SystemExit(f"{args.out} already holds results ({', '.join(existing)}). "
                          "Pick a new --out name, or add --overwrite to replace them.")
@@ -629,7 +639,43 @@ def main():
     # With --ema the live weights are validated too, and their best epoch is kept, so one
     # run answers "did averaging help?" on the same training run: no seed noise in between.
     best_live_auc, best_live_scores, best_live_thr, best_live_epoch = -1.0, None, None, None
-    for epoch in range(1, args.epochs + 1):
+
+    # --resume: last.pt holds everything that changes during training, so a crash costs
+    # at most one epoch. The settings that define the experiment must match exactly, and
+    # so must the code, or the run would quietly become a mix of two recipes.
+    # (Not bit-identical to an uninterrupted run: the image-loading helpers restart with
+    # new random augmentation streams. The recipe is the same; only the dice differ.)
+    # Settings that may differ on resume: they change speed or bookkeeping, not the recipe.
+    free = {"resume", "overwrite", "workers", "cudnn_benchmark"}
+    recipe_args = {k: v for k, v in vars(args).items() if k not in free}
+    start_epoch = 1
+    if args.resume:
+        state = torch.load(last_path, map_location=device, weights_only=False)  # our own file
+        changed = {k: (state["args"].get(k), v) for k, v in recipe_args.items()
+                   if state["args"].get(k) != v}
+        if changed:
+            raise SystemExit(f"--resume: these settings differ from the original run (was, now): {changed}")
+        # (Uncommitted edits can't be compared, so they are only allowed if the run had them too.)
+        if state["code_version"] != commit or (dirty and not state["code_dirty"]):
+            raise SystemExit(f"--resume: the code changed (run started at {state['code_version']}, now "
+                             f"{commit}{' with uncommitted edits' if dirty else ''}). Check out that commit.")
+        model.load_state_dict(state["model"])
+        loss_fn.load_state_dict(state["loss"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        scaler.load_state_dict(state["scaler"])
+        if ema:
+            for c, sd in zip(ema.copies, state["ema"]):
+                c.load_state_dict(sd)
+        (best_auc, history, best_val_scores, best_thr, best_live_auc, best_live_scores,
+         best_live_thr, best_live_epoch) = state["bests"]
+        torch.set_rng_state(state["rng"]["torch"].cpu())
+        if state["rng"]["cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([s.cpu() for s in state["rng"]["cuda"]])
+        start_epoch = state["epoch"] + 1
+        print(f"Resuming after epoch {state['epoch']} (best val AUC so far {best_auc:.4f})")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         t0 = time.time()
         running, seen, skipped, waited = 0.0, 0, 0, 0.0
@@ -740,6 +786,19 @@ def main():
             best_val_scores, best_thr = val_scores.copy(), thr
             print("    new best, checkpoint saved")
         write_json(f"{args.out}/history.json", history)
+        # Everything --resume needs, after EVERY epoch. Written to a temporary file first and
+        # then swapped in, so a crash in the middle of saving can't leave a broken last.pt.
+        torch.save({"epoch": epoch, "args": recipe_args, "code_version": commit, "code_dirty": dirty,
+                    "model": model.state_dict(), "loss": loss_fn.state_dict(),
+                    "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "ema": [c.state_dict() for c in ema.copies] if ema else None,
+                    "bests": (best_auc, history, best_val_scores, best_thr, best_live_auc,
+                              best_live_scores, best_live_thr, best_live_epoch),
+                    "rng": {"torch": torch.get_rng_state(),
+                            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}},
+                   last_path + ".tmp")
+        os.replace(last_path + ".tmp", last_path)
 
     # ---------------- Final test ----------------
     # The test set is touched exactly once, at the very end, using the model and

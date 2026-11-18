@@ -170,6 +170,16 @@ def test_end_to_end(tmp):
         code, log = run(args)
         check(f"[{target}] a second run into the same folder is refused",
               code != 0 and "already holds results" in log)
+        if target == "ordinal":
+            # --resume: picks up last.pt (here after the final epoch, so it goes straight to
+            # the test pass) and keeps the history; a changed recipe setting is refused.
+            code, log = run(args + ["--resume"])
+            check("[ordinal] --resume continues from last.pt",
+                  code == 0 and "Resuming after epoch 2" in log and "TEST (best epoch" in log
+                  and json.load(open(os.path.join(out, "history.json"))) == history)
+            code, log = run(args + ["--resume", "--lr", "0.01"])
+            check("[ordinal] --resume with a changed setting is refused",
+                  code != 0 and "settings differ" in log)
 
     # analyze.py on the two runs above: a single-run report and a paired comparison.
     run_o, run_b = os.path.join(tmp, "run_ordinal"), os.path.join(tmp, "run_binary")
