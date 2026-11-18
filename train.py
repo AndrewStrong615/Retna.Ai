@@ -356,6 +356,9 @@ def main():
                         "another (gradient accumulation): same recipe, less GPU memory. "
                         "Use 2 if 768 px runs out of memory")
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--early-lr-scale", type=float, default=1.0,
+                   help="multiply the learning rate of the stem and the first 2 stages by this "
+                        "(e.g. 0.25), so pretrained early layers change more gently. 1 = off")
     p.add_argument("--wd", type=float, default=0.05)
     p.add_argument("--workers", type=int, default=None,
                    help="image-loading helper processes (default: CPU count, at most 8)")
@@ -581,8 +584,23 @@ def main():
     decay = [q for q in model.parameters() if q.ndim >= 2]
     no_decay = [q for q in model.parameters() if q.ndim < 2] + list(loss_fn.parameters())
     params = list(model.parameters()) + list(loss_fn.parameters())   # for gradient clipping
-    optimizer = torch.optim.AdamW([{"params": decay, "weight_decay": args.wd},
-                                   {"params": no_decay, "weight_decay": 0.0}], lr=args.lr)
+    if args.early_lr_scale == 1.0:                 # default: exactly the old two groups
+        groups = [{"params": decay, "weight_decay": args.wd},
+                  {"params": no_decay, "weight_decay": 0.0}]
+    else:
+        # --early-lr-scale: the stem and stages 1-2 detect edges, colours and small
+        # textures, which pretraining already learned well; a smaller step keeps them
+        # from being pushed around while the later stages and the head adapt to grading.
+        # Each group's "lr" is scaled, so warmup and cosine still apply to all of them.
+        early = {id(q) for q in list(model.stem.parameters()) + list(model.stages[0].parameters())
+                 + list(model.stages[1].parameters())}
+        groups = []
+        for qs, wd in ((decay, args.wd), (no_decay, 0.0)):
+            for is_early in (True, False):
+                part = [q for q in qs if (id(q) in early) == is_early]
+                groups.append({"params": part, "weight_decay": wd,
+                               "lr": args.lr * (args.early_lr_scale if is_early else 1.0)})
+    optimizer = torch.optim.AdamW(groups, lr=args.lr)
 
     # Learning rate schedule: ramp up gently at the start (random weights are
     # fragile), then smoothly decrease so the model settles into a good solution.
@@ -677,7 +695,7 @@ def main():
         row = dict(epoch=epoch, train_loss=train_loss, val_loss=val_loss,
                    train_auc=safe_auc(tg[finite] >= REFERABLE_FROM, ts[finite]),
                    val_auc=val_auc, minutes=(time.time() - t0) / 60,
-                   lr=scheduler.get_last_lr()[0], skipped_steps=skipped,
+                   lr=scheduler.get_last_lr()[-1], skipped_steps=skipped,   # full-rate group
                    train_img_per_s=len(tg) / train_seconds, data_wait=waited / train_seconds,
                    val_mean_score_by_grade={int(k): float(val_scores[val_grades == k].mean())
                                             for k in np.unique(val_grades)})
