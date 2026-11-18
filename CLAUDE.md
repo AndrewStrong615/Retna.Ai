@@ -688,6 +688,38 @@ Not scored on IDRiD: S17 + AdaBN (a 4th look); if both work, their combination w
 - Meaning: most of the camera shift sits in the BatchNorm statistics. A new clinic needs a few hundred UNGRADED photos
   before going live. IDRiD is now used up for choosing anything.
 
+## exp18 plan: a gentler learning rate for the pretrained early layers (fixed BEFORE the run, 2026-11-18)
+
+Why: exp13, exp16 and exp17 all ended with train and val AUC close together, so the model is not overfitting and
+anti-overfitting tools (augmentation, weight decay, EMA) did not help. The pretrained start (pre1) DID help (+0.009),
+but fine-tuning moves every layer at the full lr 1e-3, so the early layers (edges, colour, small textures, which
+SimMIM already learned) may be partly overwritten in the first epochs. A smaller step for them keeps that knowledge
+while the later stages and the head learn grading. Common practice for fine-tuning pretrained CNNs; cheap to test.
+
+The change, exp18 = exp15 + `--early-lr-scale 0.25`: ONE change. The stem and stages 1-2 (of 4) get lr x0.25
+(peak 2.5e-4); stages 3-4, GeM, the head and the loss cutpoints keep 1e-3. Same warmup and cosine for all groups,
+same weight decay split. `--early-lr-scale 1` (default) builds exactly the old two optimizer groups, so earlier runs
+are unchanged. 0.25 is chosen now and is NOT tuned (no second value is tried on this validation set).
+Also `--workers 14` (bench 2026-11-18: 184 vs 155 img/s): speed only, it does not change what the model sees.
+
+Readout: `analyze.py runs\exp15 runs\exp18 --noise-floor 0.007`.
+Rule (fixed now): `--early-lr-scale 0.25` JOINS the recipe only if it passes BOTH checks (95% range above 0 AND the
+gain is larger than the 0.007 noise floor), as exp8 and exp10 did. A tie or worse: left out, the base stays exp15.
+Prediction stated now: a small gain at best (0 to +0.008), most visible in the first ~10 epochs; a tie is likely.
+Test is touched once at the end of the run and recorded, not used to decide. No external set is scored for exp18.
+
+## BRSET licence check (2026-11-18, nothing downloaded)
+
+BRSET (Nakayama et al., PhysioNet, v1.0.1): 16,266 colour fundus photos, 8,524 Brazilian patients, Canon CR-2 and
+Nikon NF505 cameras, DR graded ICDR 0-4 (also SDRG) per photo. Access: CREDENTIALED, PhysioNet Credentialed Health
+Data License 1.5.0 + DUA, CITI "Data or Specimens Only Research" course. The user must apply for credentialing
+themselves (identity check, reference, the CITI course; usually days to weeks), then sign the DUA.
+What the licence means here: scientific research use only; never share the data with anyone (it stays on this
+laptop, out of git); no attempts at re-identification; code behind any publication goes to an open repository.
+It says nothing about sharing trained weights or using AI tools, so: (1) Claude must NOT be shown BRSET photos
+(the "look at 5 photos" step is done by the user, or skipped), since that sends restricted data to a third party;
+(2) the Stage 5 public demo with a BRSET-trained model needs a question to PhysioNet first.
+
 ## Working with me
 
 I'm learning ML through this project. Explain what you change and why, keep code well commented,
