@@ -197,6 +197,7 @@ Compare runs by best validation AUC; test numbers are recorded, never used to ch
 | exp14 | as exp13 but + DDR as a 2nd extra dataset (`--extra-labels testLabels15.csv ddr_labels.csv`; 12,522 gradable DDR photos; ~90,700 training photos) | 0.930 (59) | 0.920 / 89.6% / 74.4% | Paired vs exp13: +0.0013, 95% range -0.003 to +0.006, better in 69% of resamples: a tie on EyePACS validation, as expected (it cannot show DDR's camera diversity). Pre-set rule: NOT WORSE (lower bound -0.003 > -0.007), so DDR JOINS the recipe. No-skill 0.3695 (DDR's grade mix has more disease), so % of no-skill and train AUC are not comparable with earlier runs. Val loss lowest 0.1879 at 59, curve normal (0.913 at 27, plateau ~0.925-0.930 from 45). ~8.4 min/epoch (~8.5 h). |
 | exp15 | as exp14 but DDR balanced to EyePACS's referable share (`ddr_labels_balanced.csv`: all grade 0-1 DDR photos + a seed-0 sample of the referable ones, 19.7% referable; ~8,590 DDR photos, ~86,750 training photos) | 0.930 (55) | 0.918 / 89.6% / 76.4% | Paired vs exp14: +0.0003, 95% range -0.004 to +0.005, better in 58% of resamples: a tie; pre-set rule NOT WORSE (lower bound -0.004 > -0.007), so balanced DDR is acceptable. No-skill 0.3399 (exp14 0.3695, EyePACS 0.339): the disease mix now matches EyePACS, as intended. Dropping ~3,900 sick DDR photos cost nothing visible on EyePACS validation. Whether it shrinks the camera shift needs a NEW external set (not Messidor-2). Slower: 141 img/s, ~10.5 min/epoch (GPU-bound, data waits 1%: heat or power mode). |
 | exp16 | as exp15 but `--ema 0.9998` (averaged weights validated, saved and tested; live weights validated alongside) | 0.929 (55) | 0.926 / 90.2% / 74.6% | Deciding readout, averaged vs live weights of the SAME run: +0.0003, 95% range -0.002 to +0.003, better in 62% of resamples: check 1 NOT passed, so EMA does NOT join the recipe. Sanity vs exp15: -0.0014, range -0.006 to +0.002: not worse (lower bound > -0.007), barely. The averaged curve was much smoother (mean epoch-to-epoch change 0.0015 vs 0.0046 live; 0.0002 vs 0.0015 over epochs 45-60) and far ahead EARLY (0.845 vs 0.821 at epoch 1, 0.904 vs 0.888 at 16, 0.914 vs 0.899 at 30), but the cosine LR reaching zero already steadies the live weights, so at the end they meet (live best 0.9283 at 52). Useful for short runs or picking an epoch; nothing at the end of a full 60-epoch schedule. ~10.1 min/epoch, 147 img/s. |
+| exp17 | as exp15 but `--aug strong` (camera-difference augmentation bundle) | 0.924 (52) | 0.917 / 89.9% / 71.7% | Readout A vs exp15: -0.0062, 95% range -0.011 to -0.001, better in 0% of resamples. analyze.py says tie (0.0062 < noise 0.007), but the pre-registered rule needed the lower bound > -0.007: FAILS, so exp17 is NOT scored on IDRiD and `--aug strong` does not join. Train/val gap small (0.939 vs 0.9235 at epoch 60). ~11.2 min/epoch, ~131 img/s, ~30% waiting for data (8 workers). |
 
 Reading exp2-exp4: three different recipes all end at ~0.845 val AUC after 30 epochs, with train AUC = val AUC and
 the curve still rising slowly when the cosine LR hits zero. The ordinal target did not help on real photos (the
@@ -669,6 +670,23 @@ shows a specificity gain at the standard cutoff with a 95% range above 0 AND S15
 It is NOT a training change, so EyePACS validation cannot judge it and the S17 rule above is unchanged.
 Prediction stated now: S15a has the higher specificity at a lower but still >= 90% sensitivity (scores move down).
 Not scored on IDRiD: S17 + AdaBN (a 4th look); if both work, their combination waits for another untouched set.
+
+
+## exp17 + IDRiD results (2026-11-18; each system scored ONCE)
+
+- Readout A (step 3): exp17 failed not-worse (see the exp17 row), so S17 was never scored; IDRiD is used by S15 and S15a only. Deviation, stated openly: step 3's text says "IDRiD stays untouched" if exp17 fails, and the AdaBN amendment never updated that line. S15 vs S15a was run anyway (user approved 2026-11-18) because its rule and prediction were fixed before any IDRiD photo was downloaded; S17 stayed out.
+- IDRiD prep: "B. Disease Grading" zip; train 413 + test 103 photos, test names prefixed `test_`; labels -> `idrid\idrid_labels.csv`
+  (image,level). Count check: 516 labels = 516 photos, grades 0:168 1:25 2:168 3:93 4:62, 323 referable. Preprocessed
+  512 px enhance + tight mask, 0 failures; 5 photos looked at, masks fine. No pairing: one photo = one patient.
+- S15 (`runs\idrid_s15`): AUC 0.952 [0.934, 0.966]; standard cutoff sens 100.0%, spec 39.9% [32.7, 46.7], refers 85.1%.
+  The worst camera shift seen so far (APTOS spec 72%): ranking holds, the EyePACS cutoff does not.
+- S15a = + AdaBN (`runs\idrid_s15a`): AUC 0.968 [0.955, 0.978]; standard cutoff sens 96.3% [94.3, 98.2], spec 75.1% [68.7, 81.1],
+  refers 69.6%. Grade 0 referred 56.5% -> 20.8%; grade 2 100% -> 93.5%.
+- `compare_external.py runs\idrid_s15 runs\idrid_s15a`: AUC +0.0161 [0.006, 0.028]; standard sens -3.7 points [-5.7, -1.8],
+  spec +35.2 points [+28.6, +42.0]. Rule: spec gain range above 0 YES, sens >= 90% YES => AdaBN IS a working deployment step.
+  The stated prediction (higher spec at lower but >= 90% sens) came true.
+- Meaning: most of the camera shift sits in the BatchNorm statistics. A new clinic needs a few hundred UNGRADED photos
+  before going live. IDRiD is now used up for choosing anything.
 
 ## Working with me
 
