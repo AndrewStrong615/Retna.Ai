@@ -62,6 +62,14 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   bootstrap of the differences in AUC, sensitivity and specificity, each system at its own cutoffs). Self-check:
   recomputes each folder's own numbers with the same resamples and refuses if they differ from its
   external_results.json. Reads finished outputs only, so it adds no look at a set.
+- `adapt_site.py`: AdaBN as a deployment step for a NEW clinic (the IDRiD check S15 vs S15a showed it works).
+  `adapt --tta-runs <run>_tta... --images <ungraded calibration photos> --out runs\site_X`: each model's 20
+  BatchNorm layers re-measure their mean/variance on the clinic's photos (no grades, no weight trained; refuses fewer
+  than `--min-photos` 200 and a second calibration into the same folder); saves `model_<i>.pt` (best.pt layout +
+  `adapted`), `calibration_photos.csv` and `site.json` with the score scales and BOTH cutoffs exactly as fixed on
+  EyePACS validation (no both-eyes, as external_test.py without `--pairs`). `score --site runs\site_X --images
+  <photos> --out file.csv`: 8-view TTA with the adapted copies, standardized like validation, referred at both
+  cutoffs. Reports nothing about accuracy (no grades): measuring AdaBN stays `external_test.py --adapt-bn`'s job.
 - `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
   `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate
   names and grades outside 0-5. All of DDR is training data (our validation/test stay pure EyePACS).

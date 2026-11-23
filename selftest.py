@@ -484,6 +484,47 @@ def test_end_to_end(tmp):
           and adabn_scores.notna().all() and not np.allclose(adabn_scores, plain_scores) and code_d2 == 0,
           (log_d or log_d2).strip().splitlines()[-1] if (log_d or log_d2) else "")
 
+    # adapt_site.py: calibrate a "new clinic" on its ungraded photos, then screen. The cutoffs must be the
+    # ones external_test.py fixed on validation for the same system (no pairing), and the screening
+    # scores must be the adapted models' standardized TTA scores.
+    site = os.path.join(tmp, "site_x")
+    code_s, log_s = run(["adapt_site.py", "adapt", "--tta-runs", tta_out, "--images", renamed, "--out", site,
+                         "--workers", "0", "--n-boot", "50", "--min-photos", "20"])
+    code_s2, log_s2 = run(["adapt_site.py", "adapt", "--tta-runs", tta_out, "--images", renamed, "--out", site,
+                           "--workers", "0", "--min-photos", "20"])
+    code_s3, log_s3 = run(["adapt_site.py", "adapt", "--tta-runs", tta_out, "--images", renamed,
+                           "--out", os.path.join(tmp, "site_small"), "--workers", "0"])
+    screened = os.path.join(site, "week1.csv")
+    code_s4, log_s4 = run(["adapt_site.py", "score", "--site", site, "--images", renamed, "--out", screened,
+                           "--workers", "0"])
+    site_ok = False
+    if code_s == 0 and code_s4 == 0:
+        info = json.load(open(os.path.join(site, "site.json")))
+        from tta import score_eyes
+        from data import FundusDataset, make_transforms
+        from model import build_model
+        ck = torch.load(os.path.join(site, "model_0.pt"), map_location="cpu")
+        net = build_model(**ck["arch"])
+        net.load_state_dict(ck["model"])
+        orig = torch.load(os.path.join(run_o, "best.pt"), map_location="cpu")
+        _, tf = make_transforms(ck["size"], ck["mean"], ck["std"])
+        sc = pd.read_csv(screened, dtype={"image": str})
+        _, tta_s = score_eyes(net, torch.utils.data.DataLoader(
+            FundusDataset(sc.assign(level=0), renamed, tf), batch_size=16), torch.device("cpu"), False)
+        mean_, sd_ = info["scales"][0]
+        moved = any(not torch.equal(ck["model"][k], orig["model"][k]) for k in ck["model"] if "running_mean" in k)
+        same_w = all(torch.equal(ck["model"][k], orig["model"][k]) for k in ck["model"]
+                     if not k.endswith(("running_mean", "running_var", "num_batches_tracked")))
+        site_ok = (abs(info["cutoff_standard"] - res_a["standard"]["cutoff"]) < 1e-12
+                   and abs(info["cutoff_cautious"] - res_a["cautious"]["cutoff"]) < 1e-12
+                   and np.allclose(sc["score"], (tta_s - mean_) / sd_, atol=1e-6) and moved and same_w
+                   and (sc["referred_standard"] == (sc["score"] >= info["cutoff_standard"])).all()
+                   and sc["in_calibration"].all() and info["models"][0]["bn_layers"] == 20)
+    check("adapt_site.py: BatchNorm-only calibration, validation cutoffs kept, screening scores reproduce; "
+          "refuses a second calibration and too few photos",
+          site_ok and code_s2 != 0 and "already calibrated" in log_s2 and code_s3 != 0 and "need at least" in log_s3,
+          (log_s or log_s4).strip().splitlines()[-1] if (log_s or log_s4) else "")
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,
