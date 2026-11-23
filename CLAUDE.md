@@ -86,6 +86,12 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   validation/test patients (`--exclude-labels`, same `--split-seed` as train.py). Saves `encoder.pt` and
   `last.pt` every epoch (`--resume`), reconstruction pictures every `--example-every` epochs. `train.py --init
   <encoder.pt>` starts disease training from it (same `--depth`/`--pool` required; recorded in config.json).
+- `vit.py` (Stage 2b building blocks, not yet wired into pretrain.py/train.py, never trained on real photos): a
+  Vision Transformer (patch 16, 2-D sine/cosine positions, pre-norm blocks with hand-written multi-head attention,
+  mean-pooled one-score head; ViT-Small default: dim 384, depth 12, 6 heads, 21.6M weights) and an MAE around it
+  (75% of patches hidden and dropped from the encoder, 4-block decoder with a learned mask token, per-patch
+  normalized pixel MSE on hidden patches only). `python vit.py` prints shapes and runs CPU checks (also in selftest):
+  patchify round trip, 75% masking, attention equal to PyTorch's reference, MAE loss falling on a few images.
 - `tta.py`: test-time augmentation for a finished run: scores each eye in the 8 exact orientations of a square
   (flips, 90/180/270 turns) and averages. Writes a run-like folder (`<run>_tta`) that analyze.py reads unchanged.
   Validation first (new 90%-sensitivity cutoff chosen there); `--split test` only once, after deciding; refuses
@@ -126,7 +132,7 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   `--adapt-bn` (AdaBN, off by default): the photos are split by patient into 2 halves (seed 0); each half is scored
   by a model copy whose 20 BatchNorm layers re-measured their mean/variance on the OTHER half's images (plain view,
   no grades, no weights trained). Recorded as `adapt_bn` in external_results.json.
-- `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
+- `selftest.py`: one command, ~3-4 min on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
   together, to find what limits training speed on a machine (~3-4 min; stop training first). `--aug strong` times
@@ -743,6 +749,8 @@ and don't swap my hand-written components for library versions without asking.
    83.3%. Two seeds of that recipe (Stage 2 v4): TEST 0.941 / 88.6% / 84.4%, the current best.
    External (Messidor-2, Stage 4): AUC 0.951; at the EyePACS cutoff sens 97.6%, spec 62.5% (see "Stage 4 result").
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
+   Building blocks done in code (`vit.py`, CPU checks only); next: an MAE mode in pretrain.py and a ViT option in
+   train.py, then a GPU run.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
    something I recognize" check, since today's model sees every photo only as a DR score. Predicted DR grade

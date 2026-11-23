@@ -640,8 +640,15 @@ def test_end_to_end(tmp):
         check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
 
 
+def test_vit():
+    from vit import _checks
+    for name, ok in _checks().items():
+        check(f"vit.py (Stage 2b): {name}", ok)
+
+
 def main():
     test_threshold()
+    test_vit()
     test_ordinal_loss()
     with tempfile.TemporaryDirectory() as tmp:
         test_saving(tmp)
