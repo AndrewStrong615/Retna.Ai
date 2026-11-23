@@ -85,6 +85,12 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   to redo either. Its self-check: view 1 reproduces the run's own val AUC. `--eval-size N` scores the photos
   resized to N px instead of the training size (same weights; default folder `<run>_tta_s<N>`); the size is stored
   in tta.json, and the test pass and `external_test.py` reuse it (folders without it used the training size).
+- `grade_report.py <run or run_tta>`: the 0-4 grade read off an ordinal run's learned cutpoints (median of the
+  predicted grade distribution: how many boundaries have P(grade > k) >= 0.5), against the true grade: confusion
+  table, exact / within-one agreement, quadratic weighted kappa (hand-written, the 2015 Kaggle metric) with a patient
+  bootstrap range. Nothing chosen (cutpoints come from training); validation by default. Not for ensembles/both-eyes
+  (standardized scores). train.py now also writes `predicted_grade` into ordinal runs' predictions CSVs
+  (`CumulativeLogitLoss.predicted_grade` / `grade_probs`); every other column is unchanged.
 - `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
   of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
   labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
@@ -720,8 +726,8 @@ and don't swap my hand-written components for library versions without asking.
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
-   something I recognize" check, since today's model sees every photo only as a DR score. Next small step on the
-   way: report the predicted DR grade (0-4) from the ordinal model's cutpoints, not only referable yes/no.
+   something I recognize" check, since today's model sees every photo only as a DR score. Predicted DR grade
+   (0-4) from the ordinal cutpoints: code done (`grade_report.py`), not yet run on a real model.
 4. Stage 4: external validation (e.g. Messidor-2) and comparison with published benchmarks.
 5. Stage 5 (idea): a public demo page where people upload a photo and get the scores plus heat maps. Clearly an
    educational demo, not a diagnosis; store nothing; refuse images that are not usable retina photos.

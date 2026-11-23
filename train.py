@@ -192,6 +192,27 @@ class CumulativeLogitLoss(nn.Module):
     def prob_referable(self, score):
         return torch.sigmoid(score + self.cutpoints()[REFERABLE_FROM - 1])
 
+    def grade_probs(self, score):
+        """
+        P(grade = k) for k = 0..4, from the same one score: the model gives P(grade > k)
+        for every boundary, and the chance of exactly grade k is the step between two of them,
+        P(grade > k-1) - P(grade > k) (with P(grade > -1) = 1 and P(grade > 4) = 0).
+        The cutpoints stay in order, so every step is >= 0 and the five add up to 1.
+        """
+        above = torch.sigmoid(score[:, None] + self.cutpoints()[None, :])        # (n, 4)
+        ones, zeros = torch.ones_like(above[:, :1]), torch.zeros_like(above[:, :1])
+        return torch.cat([ones, above], dim=1) - torch.cat([above, zeros], dim=1)
+
+    def predicted_grade(self, score):
+        """
+        The grade the model would report: the number of boundaries the eye is more likely
+        than not to be past, i.e. how many of P(grade > k) are >= 0.5. This is the MEDIAN of
+        the predicted grade distribution, the natural single answer for ordered labels.
+        Same thing without the sigmoid: count the k with score + cut[k] >= 0.
+        """
+        cut = self.cutpoints().detach().to(score.dtype)      # float64 scores stay float64: same answer as from the CSV
+        return (score[:, None] + cut[None, :] >= 0).sum(dim=1)
+
 
 class BinaryLoss(nn.Module):
     """
@@ -333,6 +354,11 @@ def save_predictions(path, df, scores, threshold, loss_fn, device):
     out["score"] = np.asarray(scores, dtype=np.float64)
     out["prob_referable"] = probs
     out["referred"] = np.asarray(scores) >= threshold
+    if hasattr(loss_fn, "predicted_grade"):
+        # Ordinal target only: the 0-4 grade read off the learned cutpoints (see grade_report.py).
+        with torch.no_grad():
+            out["predicted_grade"] = loss_fn.predicted_grade(
+                torch.as_tensor(np.asarray(scores, dtype=np.float64), device=device)).cpu().numpy()
     try:
         out.to_csv(path, index=False)
     except OSError as e:

@@ -171,6 +171,30 @@ def test_end_to_end(tmp):
         check(f"[{target}] a second run into the same folder is refused",
               code != 0 and "already holds results" in log)
 
+    # Predicted 0-4 grade from the ordinal cutpoints: saved by train.py, reproduced by grade_report.py,
+    # hand-written kappa equal to scikit-learn's, grade probabilities sum to 1; binary runs refused.
+    from sklearn.metrics import cohen_kappa_score
+    from grade_report import load_cutpoints, weighted_kappa
+    run_o_dir = os.path.join(tmp, "run_ordinal")
+    vo = pd.read_csv(os.path.join(run_o_dir, "val_predictions.csv"), converters={"score": float})
+    lossf, _ = load_cutpoints(run_o_dir)
+    with torch.no_grad():
+        again = lossf.predicted_grade(torch.tensor(vo["score"].to_numpy())).numpy()
+        probs = lossf.grade_probs(torch.linspace(-8, 8, 50))
+        median = (probs.cumsum(dim=1) < 0.5).sum(dim=1)      # first grade where the cumulative share reaches 0.5
+        direct = lossf.predicted_grade(torch.linspace(-8, 8, 50))
+    rng = np.random.default_rng(0)
+    t_k = rng.integers(0, 5, 300)
+    p_k = np.clip(t_k + rng.integers(-2, 3, 300), 0, 4)
+    code_g, log_g = run(["grade_report.py", run_o_dir, "--n-boot", "50"])
+    code_gb, log_gb = run(["grade_report.py", os.path.join(tmp, "run_binary")])
+    check("predicted grade: saved = recomputed, median of the grade probabilities, kappa = sklearn's, binary refused",
+          (vo["predicted_grade"].to_numpy() == again).all() and torch.allclose(probs.sum(dim=1), torch.ones(50))
+          and (probs >= 0).all() and torch.equal(median, direct)
+          and abs(weighted_kappa(t_k, p_k) - cohen_kappa_score(t_k, p_k, weights="quadratic")) < 1e-12
+          and code_g == 0 and "weighted kappa" in log_g and code_gb != 0 and "only the ordinal" in log_gb,
+          (log_g or log_gb).strip().splitlines()[-1] if (log_g or log_gb) else "")
+
     # analyze.py on the two runs above: a single-run report and a paired comparison.
     run_o, run_b = os.path.join(tmp, "run_ordinal"), os.path.join(tmp, "run_binary")
     code1, log1 = run(["analyze.py", run_o, "--n-boot", "50"])
