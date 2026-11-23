@@ -415,6 +415,30 @@ def test_end_to_end(tmp):
     check("train.py: two extra datasets at once, each recorded",
           code == 0 and len(rec) == 2 and rec[1]["n_images"] == expected and "train now" in log)
 
+    # --source-mix: the sampler keeps every batch's mix within one photo of the shares, uses every photo of a
+    # source before repeating one, and train.py records it; a wrong number of shares is refused.
+    from data import SourceMixSampler
+    src = np.array([0] * 100 + [1] * 300 + [2] * 40)
+    smp = SourceMixSampler(src, [2, 2, 1], seed=0)
+    epochs = [np.array(list(smp)) for _ in range(3)]
+    quota = np.array([0.4, 0.4, 0.2]) * 32
+    batch_ok = all(np.all(np.abs(np.bincount(src[e[i:i + 32]], minlength=3) - quota) <= 1)
+                   for e in epochs for i in range(0, len(e) - 31, 32))
+    seen = np.concatenate(epochs)
+    # source 1 (300 photos, 176 slots/epoch): 528 draws over 3 epochs = every photo once, then 228 again
+    reps = np.bincount(seen[src[seen] == 1], minlength=400)[100:400]
+    small = np.bincount(seen[src[seen] == 2], minlength=440)[400:]      # 40 photos, 264 draws: 6-7 each
+    out_mix = os.path.join(tmp, "run_mix")
+    code_m, log_m = run(base + ["--extra-labels", extra_csv, ddr_csv, "--extra-images", renamed, ddr_proc,
+                                "--source-mix", "0.4", "0.4", "0.2", "--out", out_mix])
+    mix_rec = json.load(open(os.path.join(out_mix, "config.json")))["source_mix"] if code_m == 0 else None
+    code_m2, log_m2 = run(base + ["--extra-labels", extra_csv, "--extra-images", renamed,
+                                  "--source-mix", "0.4", "0.4", "0.2", "--out", os.path.join(tmp, "run_mix_bad")])
+    check("train.py --source-mix: batches hold the mix, photos used evenly, recorded; wrong count refused",
+          batch_ok and len(seen) == 3 * 440 and set(reps) <= {1, 2} and set(small) <= {6, 7}
+          and code_m == 0 and mix_rec and np.allclose(mix_rec["shares"], [0.4, 0.4, 0.2])
+          and "source mix per batch" in log_m and code_m2 != 0 and "needs 2 shares" in log_m2)
+
     # External test (Stage 4), on a synthetic "other hospital" in Messidor-2's file formats:
     # grades with image_id/adjudicated_* columns, a left;right pairing file, one ungradable photo.
     run_b_dir = os.path.join(tmp, "run_binary")

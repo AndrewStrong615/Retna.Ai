@@ -38,7 +38,7 @@ import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, roc_curve
 from torch.utils.data import DataLoader
 
-from data import (FundusDataset, compute_mean_std, estimate_background, load_labels,
+from data import (FundusDataset, SourceMixSampler, compute_mean_std, estimate_background, load_labels,
                   make_transforms, split_by_patient)
 from model import build_model
 
@@ -420,6 +420,10 @@ def main():
                         "only, e.g. testLabels15.csv (EyePACS test folder grades) and ddr_labels.csv (DDR)")
     p.add_argument("--extra-images", nargs="+", default=None,
                    help="the folder of each --extra-labels CSV, in the same order, preprocessed like --images")
+    p.add_argument("--source-mix", nargs="+", type=float, default=None,
+                   help="share of every batch from each training source: the --images photos first, then each "
+                        "--extra-labels dataset in order, e.g. 0.4 0.4 0.2 (normalized to sum to 1). Default: "
+                        "plain shuffling, so each source's share is its share of the photos (the old behavior)")
     p.add_argument("--limit", type=int, default=0, help="use only about N images, for quick tests")
     p.add_argument("--split-seed", type=int, default=42,
                    help="which patients go to train/val/test (keep 42 to compare runs)")
@@ -428,6 +432,9 @@ def main():
     args = p.parse_args()
     if args.accum < 1 or args.batch % args.accum:
         raise SystemExit(f"--batch {args.batch} must split evenly into --accum {args.accum} pieces.")
+    if args.source_mix is not None and len(args.source_mix) != 1 + len(args.extra_labels or []):
+        raise SystemExit(f"--source-mix needs {1 + len(args.extra_labels or [])} shares: one for --images, then "
+                         "one per --extra-labels dataset, in the same order.")
     if not 0 <= args.ema < 1:
         raise SystemExit(f"--ema {args.ema} must be 0 (off) or a decay below 1, e.g. 0.9998.")
 
@@ -537,15 +544,34 @@ def main():
                   f"{os.path.basename(labels_csv)} (training only; {extra_missing} labels had no image)")
         pd.concat([e.assign(source=os.path.basename(c)) for e, c in zip(extras, args.extra_labels)],
                   ignore_index=True).to_csv(f"{args.out}/extra_split.csv", index=False)
-        train_df = pd.concat([train_df.assign(image_dir=args.images)] + extras, ignore_index=True)
+        train_df = pd.concat([train_df.assign(image_dir=args.images, source_id=0)]
+                             + [e.assign(source_id=i + 1) for i, e in enumerate(extras)], ignore_index=True)
         print(f"       -> train now {len(train_df)} images")
 
-    def loader(part, tf, n_workers, shuffle=False, keep_workers=False, batch=args.batch):
+    # ---------------- Source mix (optional) ----------------
+    # Without --source-mix nothing here runs and the training loader shuffles exactly as before.
+    mix_sampler, mix_info = None, None
+    if args.source_mix is not None:
+        sources = train_df["source_id"].to_numpy() if "source_id" in train_df else np.zeros(len(train_df), int)
+        mix_sampler = SourceMixSampler(sources, args.source_mix, seed=args.seed)
+        natural = np.bincount(sources, minlength=len(args.source_mix)) / len(sources)
+        # How often each photo of a source is seen per epoch on average (1.0 = as with plain shuffling).
+        per_photo = [float(c / max(n, 1)) for c, n in zip(mix_sampler.counts, np.bincount(
+            sources, minlength=len(args.source_mix)))]
+        mix_info = {"shares": mix_sampler.shares.tolist(), "natural_shares": natural.tolist(),
+                    "photos_per_epoch": mix_sampler.counts.tolist(), "views_per_photo_per_epoch": per_photo}
+        print("source mix per batch: " + ", ".join(
+            f"source {i} {sh:.0%} (natural {na:.0%}, each photo seen {v:.2f}x per epoch)"
+            for i, (sh, na, v) in enumerate(zip(mix_sampler.shares, natural, per_photo))))
+
+    def loader(part, tf, n_workers, shuffle=False, keep_workers=False, batch=args.batch, sampler=None):
         # persistent_workers keeps the helper processes alive between epochs.
         # Starting them is slow on Windows (each one loads PyTorch again), so
         # without it every epoch would begin with a long pause.
+        # A sampler (--source-mix) replaces the shuffling: it decides the order itself.
         return DataLoader(FundusDataset(part, args.images, tf), batch_size=batch,
-                          shuffle=shuffle, drop_last=shuffle and len(part) > batch,
+                          shuffle=shuffle and sampler is None, sampler=sampler,
+                          drop_last=shuffle and len(part) > batch,
                           num_workers=n_workers, pin_memory=use_amp,
                           persistent_workers=keep_workers and n_workers > 0)
 
@@ -554,7 +580,7 @@ def main():
     # together make one batch (see the training loop). Evaluation needs no gradients,
     # so it uses far less memory and keeps whole batches.
     train_loader = loader(train_df, train_tf, workers, shuffle=True, keep_workers=True,
-                          batch=args.batch // args.accum)
+                          batch=args.batch // args.accum, sampler=mix_sampler)
     val_loader = loader(val_df, eval_tf, eval_workers, keep_workers=True)
     # (the test loader is only created at the very end, for the single test pass)
 
@@ -598,7 +624,7 @@ def main():
                   grade_counts={k: v["level"].value_counts().sort_index().to_dict()
                                 for k, v in parts.items()},
                   sanity_run=bool(args.limit), preprocess=preprocess_info, init=init_info,
-                  extra=extra_info)
+                  extra=extra_info, source_mix=mix_info)
     write_json(f"{args.out}/config.json", config)
 
     # Weight decay gently pulls weights toward zero, which reduces overfitting.

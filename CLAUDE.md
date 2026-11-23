@@ -46,6 +46,13 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   (`extra`) and `extra_split.csv`. Without the flags, training is bit-identical to before (checked on CPU).
   Several extra datasets at once: `--extra-labels A.csv B.csv --extra-images dirA dirB` (same order); with one
   extra dataset the training table is identical to before (checked on CPU against the old code's run).
+  `--source-mix A B ...` (off by default = plain shuffling, bit-identical to before: checked on CPU with an extra
+  dataset): share of every batch from each training source (`--images` first, then each `--extra-labels` in order),
+  via the hand-written `SourceMixSampler` in data.py: same epoch length (same steps and LR schedule), each batch
+  within one photo of the shares, each source's photos all used before any repeats. Recorded as `source_mix` in
+  config.json (shares, natural shares, how often each photo is seen per epoch). The "balanced batches" camera idea:
+  EyePACS validation cannot judge it, so it needs a new untouched external set, like exp17. Note: the no-skill loss
+  and the cutpoints' starting values still follow the natural grade mix.
   `--ema D` (e.g. 0.9998; 0 = off, the old code path): a running average of the weights (hand-written
   `WeightAverage`, BatchNorm statistics and the loss's cutpoints included) is what gets validated, saved as best.pt
   and tested; training itself is unchanged. The live weights are validated too (`val_auc_live` in history.json)
