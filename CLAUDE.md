@@ -105,6 +105,11 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   2018), unusual eye area (share of non-background pixels) and low detail (mean distance from the background colour
   inside the eye). Synthetic check: noise, blank and blurred pictures 0% ok, another synthetic clinic 86% ok. Not yet
   run on real photos; first real check: DDR grade-5 (ungradable) vs gradable photos.
+- `rescore.py --run R --labels L --images I`: validation-only re-scorer: rebuilds the run's validation eyes as
+  train.py does (`--split-after-drop` for the pre-revamp order of exp1/exp2), scores them once (plain view) and writes
+  `<run>_rescored/val_predictions.csv` + rescore.json, so a run without predictions files (exp2) pairs with later
+  runs in analyze.py. Reads old checkpoints (no arch/target/val_auc). Self-check: reproduces the run's own best val
+  AUC (best.pt or history.json). No test option, on purpose; refuses to rescore twice.
 - `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
   of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
   labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
@@ -197,8 +202,8 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). TTA (`tta.py`) done. Still open: a
-  val-only re-scorer so exp2's best.pt can be paired with later runs. Noise check done (exp7b): seed-to-seed
+- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). TTA (`tta.py`) done. Val-only re-scorer
+  (`rescore.py`) done in code; not yet run on exp2. Noise check done (exp7b): seed-to-seed
   difference 0.0001 on one pair; working `--noise-floor 0.007`.
 
 ## Experiments

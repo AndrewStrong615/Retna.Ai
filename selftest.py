@@ -594,6 +594,28 @@ def test_end_to_end(tmp):
     check("quality_check.py: unusual pictures flagged, normal photos from another clinic mostly pass",
           code_q == 0 and ok_odd <= 0.1 and ok_norm >= 0.7, f"ok: odd {ok_odd:.0%}, normal {ok_norm:.0%}")
 
+    # rescore.py: rebuilds the validation eyes, reproduces the run's own AUC, and also reads a pre-revamp
+    # style checkpoint (no arch/target/val_auc; AUC from history.json); analyze.py pairs the result.
+    code_r, log_r = run(["rescore.py", "--run", run_o, "--labels", labels, "--images", processed, "--workers", "0"])
+    resc = os.path.join(tmp, "run_ordinal_rescored")
+    rv = pd.read_csv(os.path.join(resc, "val_predictions.csv"), converters={"score": float}) if code_r == 0 else None
+    ov = pd.read_csv(os.path.join(run_o, "val_predictions.csv"), converters={"score": float})
+    old_run = os.path.join(tmp, "run_old_style")
+    os.makedirs(old_run)
+    full = torch.load(os.path.join(run_o, "best.pt"), map_location="cpu")
+    torch.save({k: full[k] for k in ("model", "mean", "std", "size", "threshold", "epoch")},
+               os.path.join(old_run, "best.pt"))
+    shutil.copy(os.path.join(run_o, "history.json"), old_run)
+    code_r2, log_r2 = run(["rescore.py", "--run", old_run, "--labels", labels, "--images", processed,
+                           "--workers", "0", "--split-after-drop"])
+    code_r3, log_r3 = run(["analyze.py", resc, run_b, "--n-boot", "50"])
+    code_r4, log_r4 = run(["rescore.py", "--run", run_o, "--labels", labels, "--images", processed, "--workers", "0"])
+    check("rescore.py: same validation eyes and AUC as the run, old-style checkpoint read, analyze pairs it, once only",
+          code_r == 0 and rv["image"].tolist() == ov["image"].tolist() and np.allclose(rv["score"], ov["score"], atol=1e-6)
+          and "-> matches" in log_r and code_r2 == 0 and "-> matches" in log_r2 and code_r3 == 0 and "Verdict" in log_r3
+          and code_r4 != 0 and "already rescored" in log_r4,
+          (log_r or log_r2).strip().splitlines()[-1] if (log_r or log_r2) else "")
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,
