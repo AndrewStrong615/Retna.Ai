@@ -573,6 +573,27 @@ def test_end_to_end(tmp):
           site_ok and code_s2 != 0 and "already calibrated" in log_s2 and code_s3 != 0 and "need at least" in log_s3,
           (log_s or log_s4).strip().splitlines()[-1] if (log_s or log_s4) else "")
 
+    # quality_check.py: fitted on training photos, limits on validation pictures; normal photos from another
+    # synthetic "clinic" pass far more often than noise, blank and heavily blurred pictures.
+    from PIL import ImageFilter
+    odd = os.path.join(tmp, "odd_photos")
+    os.makedirs(odd)
+    rng_q = np.random.default_rng(0)
+    normal = sorted(f for f in os.listdir(renamed) if f.endswith(".jpg"))[:8]
+    bg = tuple(int(c) for c in np.asarray(Image.open(os.path.join(renamed, normal[0])).convert("RGB"))[0, 0])
+    for i, n in enumerate(normal):
+        Image.fromarray(rng_q.integers(0, 256, (96, 96, 3), dtype=np.uint8)).save(os.path.join(odd, f"noise_{i}.jpg"))
+        Image.new("RGB", (96, 96), bg).save(os.path.join(odd, f"blank_{i}.jpg"))
+        Image.open(os.path.join(renamed, n)).filter(ImageFilter.GaussianBlur(4)).save(os.path.join(odd, f"blur_{i}.jpg"))
+    code_q, log_q = run(["quality_check.py", "fit", "--run", run_o, "--images", processed, "--quantile", "0.05"])
+    q_odd, q_norm = os.path.join(tmp, "q_odd.csv"), os.path.join(tmp, "q_norm.csv")
+    code_q2, log_q2 = run(["quality_check.py", "check", "--run", run_o, "--images", odd, "--out", q_odd])
+    code_q3, log_q3 = run(["quality_check.py", "check", "--run", run_o, "--images", renamed, "--out", q_norm])
+    ok_odd = pd.read_csv(q_odd)["ok"].mean() if code_q2 == 0 else 1
+    ok_norm = pd.read_csv(q_norm)["ok"].mean() if code_q3 == 0 else 0
+    check("quality_check.py: unusual pictures flagged, normal photos from another clinic mostly pass",
+          code_q == 0 and ok_odd <= 0.1 and ok_norm >= 0.7, f"ok: odd {ok_odd:.0%}, normal {ok_norm:.0%}")
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,

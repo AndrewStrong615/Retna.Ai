@@ -98,6 +98,13 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   bootstrap range. Nothing chosen (cutpoints come from training); validation by default. Not for ensembles/both-eyes
   (standardized scores). train.py now also writes `predicted_grade` into ordinal runs' predictions CSVs
   (`CumulativeLogitLoss.predicted_grade` / `grade_probs`); every other column is unchanged.
+- `quality_check.py` (Stage 3 step: "is this a photo I know how to read?"): `fit --run R --images <its photos>`
+  measures the training photos' 512 pooled features (mean + covariance shrunk 10% toward a sphere) and sets limits
+  on VALIDATION pictures (grades never read; `--quantile` 1% beyond each limit), saved as `R\quality_ref.pt`.
+  `check --run R --images <folder> --out q.csv` flags per photo: unusual features (Mahalanobis distance, Lee et al.
+  2018), unusual eye area (share of non-background pixels) and low detail (mean distance from the background colour
+  inside the eye). Synthetic check: noise, blank and blurred pictures 0% ok, another synthetic clinic 86% ok. Not yet
+  run on real photos; first real check: DDR grade-5 (ungradable) vs gradable photos.
 - `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
   of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
   labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
