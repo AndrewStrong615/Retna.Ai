@@ -171,6 +171,30 @@ def test_end_to_end(tmp):
         check(f"[{target}] a second run into the same folder is refused",
               code != 0 and "already holds results" in log)
 
+    # Predicted 0-4 grade from the ordinal cutpoints: saved by train.py, reproduced by grade_report.py,
+    # hand-written kappa equal to scikit-learn's, grade probabilities sum to 1; binary runs refused.
+    from sklearn.metrics import cohen_kappa_score
+    from grade_report import load_cutpoints, weighted_kappa
+    run_o_dir = os.path.join(tmp, "run_ordinal")
+    vo = pd.read_csv(os.path.join(run_o_dir, "val_predictions.csv"), converters={"score": float})
+    lossf, _ = load_cutpoints(run_o_dir)
+    with torch.no_grad():
+        again = lossf.predicted_grade(torch.tensor(vo["score"].to_numpy())).numpy()
+        probs = lossf.grade_probs(torch.linspace(-8, 8, 50))
+        median = (probs.cumsum(dim=1) < 0.5).sum(dim=1)      # first grade where the cumulative share reaches 0.5
+        direct = lossf.predicted_grade(torch.linspace(-8, 8, 50))
+    rng = np.random.default_rng(0)
+    t_k = rng.integers(0, 5, 300)
+    p_k = np.clip(t_k + rng.integers(-2, 3, 300), 0, 4)
+    code_g, log_g = run(["grade_report.py", run_o_dir, "--n-boot", "50"])
+    code_gb, log_gb = run(["grade_report.py", os.path.join(tmp, "run_binary")])
+    check("predicted grade: saved = recomputed, median of the grade probabilities, kappa = sklearn's, binary refused",
+          (vo["predicted_grade"].to_numpy() == again).all() and torch.allclose(probs.sum(dim=1), torch.ones(50))
+          and (probs >= 0).all() and torch.equal(median, direct)
+          and abs(weighted_kappa(t_k, p_k) - cohen_kappa_score(t_k, p_k, weights="quadratic")) < 1e-12
+          and code_g == 0 and "weighted kappa" in log_g and code_gb != 0 and "only the ordinal" in log_gb,
+          (log_g or log_gb).strip().splitlines()[-1] if (log_g or log_gb) else "")
+
     # analyze.py on the two runs above: a single-run report and a paired comparison.
     run_o, run_b = os.path.join(tmp, "run_ordinal"), os.path.join(tmp, "run_binary")
     code1, log1 = run(["analyze.py", run_o, "--n-boot", "50"])
@@ -391,6 +415,30 @@ def test_end_to_end(tmp):
     check("train.py: two extra datasets at once, each recorded",
           code == 0 and len(rec) == 2 and rec[1]["n_images"] == expected and "train now" in log)
 
+    # --source-mix: the sampler keeps every batch's mix within one photo of the shares, uses every photo of a
+    # source before repeating one, and train.py records it; a wrong number of shares is refused.
+    from data import SourceMixSampler
+    src = np.array([0] * 100 + [1] * 300 + [2] * 40)
+    smp = SourceMixSampler(src, [2, 2, 1], seed=0)
+    epochs = [np.array(list(smp)) for _ in range(3)]
+    quota = np.array([0.4, 0.4, 0.2]) * 32
+    batch_ok = all(np.all(np.abs(np.bincount(src[e[i:i + 32]], minlength=3) - quota) <= 1)
+                   for e in epochs for i in range(0, len(e) - 31, 32))
+    seen = np.concatenate(epochs)
+    # source 1 (300 photos, 176 slots/epoch): 528 draws over 3 epochs = every photo once, then 228 again
+    reps = np.bincount(seen[src[seen] == 1], minlength=400)[100:400]
+    small = np.bincount(seen[src[seen] == 2], minlength=440)[400:]      # 40 photos, 264 draws: 6-7 each
+    out_mix = os.path.join(tmp, "run_mix")
+    code_m, log_m = run(base + ["--extra-labels", extra_csv, ddr_csv, "--extra-images", renamed, ddr_proc,
+                                "--source-mix", "0.4", "0.4", "0.2", "--out", out_mix])
+    mix_rec = json.load(open(os.path.join(out_mix, "config.json")))["source_mix"] if code_m == 0 else None
+    code_m2, log_m2 = run(base + ["--extra-labels", extra_csv, "--extra-images", renamed,
+                                  "--source-mix", "0.4", "0.4", "0.2", "--out", os.path.join(tmp, "run_mix_bad")])
+    check("train.py --source-mix: batches hold the mix, photos used evenly, recorded; wrong count refused",
+          batch_ok and len(seen) == 3 * 440 and set(reps) <= {1, 2} and set(small) <= {6, 7}
+          and code_m == 0 and mix_rec and np.allclose(mix_rec["shares"], [0.4, 0.4, 0.2])
+          and "source mix per batch" in log_m and code_m2 != 0 and "needs 2 shares" in log_m2)
+
     # External test (Stage 4), on a synthetic "other hospital" in Messidor-2's file formats:
     # grades with image_id/adjudicated_* columns, a left;right pairing file, one ungradable photo.
     run_b_dir = os.path.join(tmp, "run_binary")
@@ -484,6 +532,90 @@ def test_end_to_end(tmp):
           and adabn_scores.notna().all() and not np.allclose(adabn_scores, plain_scores) and code_d2 == 0,
           (log_d or log_d2).strip().splitlines()[-1] if (log_d or log_d2) else "")
 
+    # adapt_site.py: calibrate a "new clinic" on its ungraded photos, then screen. The cutoffs must be the
+    # ones external_test.py fixed on validation for the same system (no pairing), and the screening
+    # scores must be the adapted models' standardized TTA scores.
+    site = os.path.join(tmp, "site_x")
+    code_s, log_s = run(["adapt_site.py", "adapt", "--tta-runs", tta_out, "--images", renamed, "--out", site,
+                         "--workers", "0", "--n-boot", "50", "--min-photos", "20"])
+    code_s2, log_s2 = run(["adapt_site.py", "adapt", "--tta-runs", tta_out, "--images", renamed, "--out", site,
+                           "--workers", "0", "--min-photos", "20"])
+    code_s3, log_s3 = run(["adapt_site.py", "adapt", "--tta-runs", tta_out, "--images", renamed,
+                           "--out", os.path.join(tmp, "site_small"), "--workers", "0"])
+    screened = os.path.join(site, "week1.csv")
+    code_s4, log_s4 = run(["adapt_site.py", "score", "--site", site, "--images", renamed, "--out", screened,
+                           "--workers", "0"])
+    site_ok = False
+    if code_s == 0 and code_s4 == 0:
+        info = json.load(open(os.path.join(site, "site.json")))
+        from tta import score_eyes
+        from data import FundusDataset, make_transforms
+        from model import build_model
+        ck = torch.load(os.path.join(site, "model_0.pt"), map_location="cpu")
+        net = build_model(**ck["arch"])
+        net.load_state_dict(ck["model"])
+        orig = torch.load(os.path.join(run_o, "best.pt"), map_location="cpu")
+        _, tf = make_transforms(ck["size"], ck["mean"], ck["std"])
+        sc = pd.read_csv(screened, dtype={"image": str})
+        _, tta_s = score_eyes(net, torch.utils.data.DataLoader(
+            FundusDataset(sc.assign(level=0), renamed, tf), batch_size=16), torch.device("cpu"), False)
+        mean_, sd_ = info["scales"][0]
+        moved = any(not torch.equal(ck["model"][k], orig["model"][k]) for k in ck["model"] if "running_mean" in k)
+        same_w = all(torch.equal(ck["model"][k], orig["model"][k]) for k in ck["model"]
+                     if not k.endswith(("running_mean", "running_var", "num_batches_tracked")))
+        site_ok = (abs(info["cutoff_standard"] - res_a["standard"]["cutoff"]) < 1e-12
+                   and abs(info["cutoff_cautious"] - res_a["cautious"]["cutoff"]) < 1e-12
+                   and np.allclose(sc["score"], (tta_s - mean_) / sd_, atol=1e-6) and moved and same_w
+                   and (sc["referred_standard"] == (sc["score"] >= info["cutoff_standard"])).all()
+                   and sc["in_calibration"].all() and info["models"][0]["bn_layers"] == 20)
+    check("adapt_site.py: BatchNorm-only calibration, validation cutoffs kept, screening scores reproduce; "
+          "refuses a second calibration and too few photos",
+          site_ok and code_s2 != 0 and "already calibrated" in log_s2 and code_s3 != 0 and "need at least" in log_s3,
+          (log_s or log_s4).strip().splitlines()[-1] if (log_s or log_s4) else "")
+
+    # quality_check.py: fitted on training photos, limits on validation pictures; normal photos from another
+    # synthetic "clinic" pass far more often than noise, blank and heavily blurred pictures.
+    from PIL import ImageFilter
+    odd = os.path.join(tmp, "odd_photos")
+    os.makedirs(odd)
+    rng_q = np.random.default_rng(0)
+    normal = sorted(f for f in os.listdir(renamed) if f.endswith(".jpg"))[:8]
+    bg = tuple(int(c) for c in np.asarray(Image.open(os.path.join(renamed, normal[0])).convert("RGB"))[0, 0])
+    for i, n in enumerate(normal):
+        Image.fromarray(rng_q.integers(0, 256, (96, 96, 3), dtype=np.uint8)).save(os.path.join(odd, f"noise_{i}.jpg"))
+        Image.new("RGB", (96, 96), bg).save(os.path.join(odd, f"blank_{i}.jpg"))
+        Image.open(os.path.join(renamed, n)).filter(ImageFilter.GaussianBlur(4)).save(os.path.join(odd, f"blur_{i}.jpg"))
+    code_q, log_q = run(["quality_check.py", "fit", "--run", run_o, "--images", processed, "--quantile", "0.05"])
+    q_odd, q_norm = os.path.join(tmp, "q_odd.csv"), os.path.join(tmp, "q_norm.csv")
+    code_q2, log_q2 = run(["quality_check.py", "check", "--run", run_o, "--images", odd, "--out", q_odd])
+    code_q3, log_q3 = run(["quality_check.py", "check", "--run", run_o, "--images", renamed, "--out", q_norm])
+    ok_odd = pd.read_csv(q_odd)["ok"].mean() if code_q2 == 0 else 1
+    ok_norm = pd.read_csv(q_norm)["ok"].mean() if code_q3 == 0 else 0
+    check("quality_check.py: unusual pictures flagged, normal photos from another clinic mostly pass",
+          code_q == 0 and ok_odd <= 0.1 and ok_norm >= 0.7, f"ok: odd {ok_odd:.0%}, normal {ok_norm:.0%}")
+
+    # rescore.py: rebuilds the validation eyes, reproduces the run's own AUC, and also reads a pre-revamp
+    # style checkpoint (no arch/target/val_auc; AUC from history.json); analyze.py pairs the result.
+    code_r, log_r = run(["rescore.py", "--run", run_o, "--labels", labels, "--images", processed, "--workers", "0"])
+    resc = os.path.join(tmp, "run_ordinal_rescored")
+    rv = pd.read_csv(os.path.join(resc, "val_predictions.csv"), converters={"score": float}) if code_r == 0 else None
+    ov = pd.read_csv(os.path.join(run_o, "val_predictions.csv"), converters={"score": float})
+    old_run = os.path.join(tmp, "run_old_style")
+    os.makedirs(old_run)
+    full = torch.load(os.path.join(run_o, "best.pt"), map_location="cpu")
+    torch.save({k: full[k] for k in ("model", "mean", "std", "size", "threshold", "epoch")},
+               os.path.join(old_run, "best.pt"))
+    shutil.copy(os.path.join(run_o, "history.json"), old_run)
+    code_r2, log_r2 = run(["rescore.py", "--run", old_run, "--labels", labels, "--images", processed,
+                           "--workers", "0", "--split-after-drop"])
+    code_r3, log_r3 = run(["analyze.py", resc, run_b, "--n-boot", "50"])
+    code_r4, log_r4 = run(["rescore.py", "--run", run_o, "--labels", labels, "--images", processed, "--workers", "0"])
+    check("rescore.py: same validation eyes and AUC as the run, old-style checkpoint read, analyze pairs it, once only",
+          code_r == 0 and rv["image"].tolist() == ov["image"].tolist() and np.allclose(rv["score"], ov["score"], atol=1e-6)
+          and "-> matches" in log_r and code_r2 == 0 and "-> matches" in log_r2 and code_r3 == 0 and "Verdict" in log_r3
+          and code_r4 != 0 and "already rescored" in log_r4,
+          (log_r or log_r2).strip().splitlines()[-1] if (log_r or log_r2) else "")
+
     # 6. The switches.
     tight = os.path.join(data, "processed_96_tight")
     code, log = run(["preprocess.py", "--src", os.path.join(data, "raw"), "--dst", tight,
@@ -508,8 +640,15 @@ def test_end_to_end(tmp):
         check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
 
 
+def test_vit():
+    from vit import _checks
+    for name, ok in _checks().items():
+        check(f"vit.py (Stage 2b): {name}", ok)
+
+
 def main():
     test_threshold()
+    test_vit()
     test_ordinal_loss()
     with tempfile.TemporaryDirectory() as tmp:
         test_saving(tmp)

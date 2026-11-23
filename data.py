@@ -224,3 +224,79 @@ class FundusDataset(Dataset):
     def __getitem__(self, i):
         img = Image.open(f"{self.dirs[i]}/{self.names[i]}.jpg").convert("RGB")
         return self.transform(img), torch.tensor(self.grades[i], dtype=torch.long)
+
+
+class SourceMixSampler(torch.utils.data.Sampler):
+    """
+    Decide how much of every batch comes from each training SOURCE (the original training
+    photos, then each --extra-labels dataset), instead of letting their sizes decide.
+
+    Why: with plain shuffling a source's share of each batch is its share of the photos,
+    e.g. EyePACS 28% + EyePACS 2015 test folder 62% + DDR 10% for exp15, so DDR's cameras
+    are seen in only ~3 of every 32 photos. A fixed mix (e.g. 0.45 0.45 0.10 -> 0.4 0.4 0.2)
+    shows the network the other cameras more often, the "balanced batches" camera idea.
+
+    How (hand-written, deterministic for a seed):
+      - the epoch keeps its usual length (len(dataset) photos), so the number of steps,
+        the learning-rate schedule and the time per epoch stay as before;
+      - source s gets round(share_s * length) slots per epoch (largest remainders fill
+        the rounding gap), and the slots are interleaved evenly ("stride scheduling":
+        each slot goes to the source furthest behind its quota), so every run of
+        `batch` consecutive photos holds each source's share to within one photo;
+      - each source hands out its photos in a shuffled order and only reshuffles after
+        ALL of them were used, carrying on into the next epoch: a small source is
+        repeated (each photo about equally often), a large one is cycled through over
+        several epochs, never sampled twice before every photo had its turn.
+    """
+
+    def __init__(self, sources, shares, seed=0):
+        sources = np.asarray(sources)
+        self.n_sources = len(shares)
+        if set(np.unique(sources)) - set(range(self.n_sources)):
+            raise ValueError("every photo's source must be 0 .. len(shares) - 1")
+        shares = np.asarray(shares, dtype=float)
+        if (shares < 0).any() or shares.sum() <= 0:
+            raise ValueError("shares must be >= 0 and not all 0")
+        self.shares = shares / shares.sum()
+        self.members = [np.flatnonzero(sources == s) for s in range(self.n_sources)]
+        for s, m in enumerate(self.members):
+            if self.shares[s] > 0 and len(m) == 0:
+                raise ValueError(f"source {s} has a share but no photos")
+        self.length = len(sources)
+        exact = self.shares * self.length
+        counts = np.floor(exact).astype(int)
+        for s in np.argsort(-(exact - counts))[: self.length - counts.sum()]:
+            counts[s] += 1                         # largest remainders take the leftover slots
+        self.counts = counts
+        self.rng = np.random.default_rng(seed)
+        self.queues = [np.empty(0, dtype=int) for _ in range(self.n_sources)]
+
+    def _take(self, s, n):
+        """The next n photos of source s, reshuffling it only once all its photos were used."""
+        out = []
+        while n > 0:
+            if len(self.queues[s]) == 0:
+                self.queues[s] = self.rng.permutation(self.members[s])
+            part, self.queues[s] = self.queues[s][:n], self.queues[s][n:]
+            out.append(part)
+            n -= len(part)
+        return np.concatenate(out) if out else np.empty(0, dtype=int)
+
+    def slot_sources(self):
+        """Which source fills each of the epoch's slots, evenly interleaved."""
+        given = np.zeros(self.n_sources)
+        order = np.empty(self.length, dtype=int)
+        for i in range(self.length):
+            behind = self.counts * (i + 1) / self.length - given    # how far each source lags its quota
+            s = int(np.argmax(behind))
+            order[i] = s
+            given[s] += 1
+        return order
+
+    def __len__(self):
+        return self.length
+
+    def __iter__(self):
+        order = self.slot_sources()
+        picks = {s: iter(self._take(s, int(c))) for s, c in enumerate(self.counts)}
+        return iter([int(next(picks[s])) for s in order])

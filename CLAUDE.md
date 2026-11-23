@@ -46,6 +46,13 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   (`extra`) and `extra_split.csv`. Without the flags, training is bit-identical to before (checked on CPU).
   Several extra datasets at once: `--extra-labels A.csv B.csv --extra-images dirA dirB` (same order); with one
   extra dataset the training table is identical to before (checked on CPU against the old code's run).
+  `--source-mix A B ...` (off by default = plain shuffling, bit-identical to before: checked on CPU with an extra
+  dataset): share of every batch from each training source (`--images` first, then each `--extra-labels` in order),
+  via the hand-written `SourceMixSampler` in data.py: same epoch length (same steps and LR schedule), each batch
+  within one photo of the shares, each source's photos all used before any repeats. Recorded as `source_mix` in
+  config.json (shares, natural shares, how often each photo is seen per epoch). The "balanced batches" camera idea:
+  EyePACS validation cannot judge it, so it needs a new untouched external set, like exp17. Note: the no-skill loss
+  and the cutpoints' starting values still follow the natural grade mix.
   `--ema D` (e.g. 0.9998; 0 = off, the old code path): a running average of the weights (hand-written
   `WeightAverage`, BatchNorm statistics and the loss's cutpoints included) is what gets validated, saved as best.pt
   and tested; training itself is unchanged. The live weights are validated too (`val_auc_live` in history.json)
@@ -62,6 +69,14 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   bootstrap of the differences in AUC, sensitivity and specificity, each system at its own cutoffs). Self-check:
   recomputes each folder's own numbers with the same resamples and refuses if they differ from its
   external_results.json. Reads finished outputs only, so it adds no look at a set.
+- `adapt_site.py`: AdaBN as a deployment step for a NEW clinic (the IDRiD check S15 vs S15a showed it works).
+  `adapt --tta-runs <run>_tta... --images <ungraded calibration photos> --out runs\site_X`: each model's 20
+  BatchNorm layers re-measure their mean/variance on the clinic's photos (no grades, no weight trained; refuses fewer
+  than `--min-photos` 200 and a second calibration into the same folder); saves `model_<i>.pt` (best.pt layout +
+  `adapted`), `calibration_photos.csv` and `site.json` with the score scales and BOTH cutoffs exactly as fixed on
+  EyePACS validation (no both-eyes, as external_test.py without `--pairs`). `score --site runs\site_X --images
+  <photos> --out file.csv`: 8-view TTA with the adapted copies, standardized like validation, referred at both
+  cutoffs. Reports nothing about accuracy (no grades): measuring AdaBN stays `external_test.py --adapt-bn`'s job.
 - `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
   `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate
   names and grades outside 0-5. All of DDR is training data (our validation/test stay pure EyePACS).
@@ -71,12 +86,36 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   validation/test patients (`--exclude-labels`, same `--split-seed` as train.py). Saves `encoder.pt` and
   `last.pt` every epoch (`--resume`), reconstruction pictures every `--example-every` epochs. `train.py --init
   <encoder.pt>` starts disease training from it (same `--depth`/`--pool` required; recorded in config.json).
+- `vit.py` (Stage 2b building blocks, not yet wired into pretrain.py/train.py, never trained on real photos): a
+  Vision Transformer (patch 16, 2-D sine/cosine positions, pre-norm blocks with hand-written multi-head attention,
+  mean-pooled one-score head; ViT-Small default: dim 384, depth 12, 6 heads, 21.6M weights) and an MAE around it
+  (75% of patches hidden and dropped from the encoder, 4-block decoder with a learned mask token, per-patch
+  normalized pixel MSE on hidden patches only). `python vit.py` prints shapes and runs CPU checks (also in selftest):
+  patchify round trip, 75% masking, attention equal to PyTorch's reference, MAE loss falling on a few images.
 - `tta.py`: test-time augmentation for a finished run: scores each eye in the 8 exact orientations of a square
   (flips, 90/180/270 turns) and averages. Writes a run-like folder (`<run>_tta`) that analyze.py reads unchanged.
   Validation first (new 90%-sensitivity cutoff chosen there); `--split test` only once, after deciding; refuses
   to redo either. Its self-check: view 1 reproduces the run's own val AUC. `--eval-size N` scores the photos
   resized to N px instead of the training size (same weights; default folder `<run>_tta_s<N>`); the size is stored
   in tta.json, and the test pass and `external_test.py` reuse it (folders without it used the training size).
+- `grade_report.py <run or run_tta>`: the 0-4 grade read off an ordinal run's learned cutpoints (median of the
+  predicted grade distribution: how many boundaries have P(grade > k) >= 0.5), against the true grade: confusion
+  table, exact / within-one agreement, quadratic weighted kappa (hand-written, the 2015 Kaggle metric) with a patient
+  bootstrap range. Nothing chosen (cutpoints come from training); validation by default. Not for ensembles/both-eyes
+  (standardized scores). train.py now also writes `predicted_grade` into ordinal runs' predictions CSVs
+  (`CumulativeLogitLoss.predicted_grade` / `grade_probs`); every other column is unchanged.
+- `quality_check.py` (Stage 3 step: "is this a photo I know how to read?"): `fit --run R --images <its photos>`
+  measures the training photos' 512 pooled features (mean + covariance shrunk 10% toward a sphere) and sets limits
+  on VALIDATION pictures (grades never read; `--quantile` 1% beyond each limit), saved as `R\quality_ref.pt`.
+  `check --run R --images <folder> --out q.csv` flags per photo: unusual features (Mahalanobis distance, Lee et al.
+  2018), unusual eye area (share of non-background pixels) and low detail (mean distance from the background colour
+  inside the eye). Synthetic check: noise, blank and blurred pictures 0% ok, another synthetic clinic 86% ok. Not yet
+  run on real photos; first real check: DDR grade-5 (ungradable) vs gradable photos.
+- `rescore.py --run R --labels L --images I`: validation-only re-scorer: rebuilds the run's validation eyes as
+  train.py does (`--split-after-drop` for the pre-revamp order of exp1/exp2), scores them once (plain view) and writes
+  `<run>_rescored/val_predictions.csv` + rescore.json, so a run without predictions files (exp2) pairs with later
+  runs in analyze.py. Reads old checkpoints (no arch/target/val_auc). Self-check: reproduces the run's own best val
+  AUC (best.pt or history.json). No test option, on purpose; refuses to rescore twice.
 - `check_labels.py`: authenticity check for a labels file from elsewhere: a finished run scores a random sample
   of its photos (plain view) and reports the AUC against the file's grades and the mean score per grade. Genuine
   labels land near the run's own val AUC; shuffled or mismatched ones near 0.5. Refuses validation/test patients.
@@ -93,7 +132,7 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   `--adapt-bn` (AdaBN, off by default): the photos are split by patient into 2 halves (seed 0); each half is scored
   by a model copy whose 20 BatchNorm layers re-measured their mean/variance on the OTHER half's images (plain view,
   no grades, no weights trained). Recorded as `adapt_bn` in external_results.json.
-- `selftest.py`: one command, ~30 s on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
+- `selftest.py`: one command, ~3-4 min on CPU: metrics, split, ordinal loss, saving, and a 2-epoch end-to-end run
   for both targets. Run it after every code change, before pushing.
 - `bench.py`: speed test that times GPU-only training steps, image loading only (4 and 8 helpers) and both
   together, to find what limits training speed on a machine (~3-4 min; stop training first). `--aug strong` times
@@ -169,8 +208,8 @@ Keep the laptop plugged in, awake (no sleep while plugged in) and with heavy app
 - Speed (bench.py on the laptop): GPU-only 301 img/s with channels_last off vs 95 with it on; loading 197 img/s
   with 4 helpers, 363 with 8. channels_last made exp3's first attempts run at ~78 img/s (5.7-6.4 min/epoch), so
   it is now off by default (`--channels-last 1` to turn it back on).
-- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). TTA (`tta.py`) done. Still open: a
-  val-only re-scorer so exp2's best.pt can be paired with later runs. Noise check done (exp7b): seed-to-seed
+- Part 2: `analyze.py` (done), preprocess.json (done), ensembles and fellow-eye blending (done). TTA (`tta.py`) done. Val-only re-scorer
+  (`rescore.py`) done in code; not yet run on exp2. Noise check done (exp7b): seed-to-seed
   difference 0.0001 on one pair; working `--noise-floor 0.007`.
 
 ## Experiments
@@ -710,10 +749,12 @@ and don't swap my hand-written components for library versions without asking.
    83.3%. Two seeds of that recipe (Stage 2 v4): TEST 0.941 / 88.6% / 84.4%, the current best.
    External (Messidor-2, Stage 4): AUC 0.951; at the EyePACS cutoff sens 97.6%, spec 62.5% (see "Stage 4 result").
    Stage 2b (later): a Vision Transformer + MAE, written from scratch, once more unlabeled photos exist.
+   Building blocks done in code (`vit.py`, CPU checks only); next: an MAE mode in pretrain.py and a ViT option in
+   train.py, then a GPU run.
 3. Stage 3: fine-tune that model on multiple diseases (fundus multi-disease, glaucoma, OCT). Long-term goal: a
    general scan, one output per condition (as many as labeled data allows), plus an image-quality / "not
-   something I recognize" check, since today's model sees every photo only as a DR score. Next small step on the
-   way: report the predicted DR grade (0-4) from the ordinal model's cutpoints, not only referable yes/no.
+   something I recognize" check, since today's model sees every photo only as a DR score. Predicted DR grade
+   (0-4) from the ordinal cutpoints: code done (`grade_report.py`), not yet run on a real model.
 4. Stage 4: external validation (e.g. Messidor-2) and comparison with published benchmarks.
 5. Stage 5 (idea): a public demo page where people upload a photo and get the scores plus heat maps. Clearly an
    educational demo, not a diagnosis; store nothing; refuse images that are not usable retina photos.
