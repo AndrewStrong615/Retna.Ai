@@ -9,7 +9,17 @@
   y = up (toward the inside of the eye), multiplied by the "stretch" slider,
   because a retina is ~0.3 mm thick and 6 mm wide and looks flat at true scale.
 
-  Three things are drawn:
+  Two shapes are offered ("Shape" in the Display section):
+    - EYEBALL: the scanned patch (and the photo, if one was lined up) is curved onto the back
+      wall of a standard 24 mm eyeball, drawn see-through with cornea, lens, iris and optic
+      nerve for orientation. A point x, y millimetres from the patch centre sits at the angle
+      (distance / 12 mm) from the back pole: distances along the wall stay true. The globe,
+      its size and the patch's place on it are a standard DRAWING; what is measured is the
+      retina's thickness (its lower surface is laid on the wall, the inner surface rises
+      from it by the measured thickness) and where the photo lines up with the scan.
+    - FLAT BLOCK: the scan exactly as measured, in its own box, including its own tilt.
+
+  Three things are drawn from the scan:
     1. the inner surface (ILM): a grid of measured depths, lit from above, and
        mixed with red where the retina under it is thicker than the threshold;
     2. the lower surface (the bright band at the bottom of the retina);
@@ -73,9 +83,6 @@
     <canvas id="gl"></canvas>
     <div id="pins"></div>
     <div id="views">
-      <button data-view="three">3/4 view</button>
-      <button data-view="top">From above</button>
-      <button data-view="front">From the front</button>
     </div>
     <div id="hint">Drag to turn · wheel or pinch to zoom · click the surface to measure a spot</div>
     <div id="legend"><span id="legendText"></span><i></i></div>
@@ -105,6 +112,11 @@
     <div class="note" style="margin-top:2px">Blue line: inner surface found. Yellow line: lower surface found. If a line is off the tissue edge, the numbers there are wrong.</div>
 
     <h2>Display</h2>
+    <div class="row"><label for="shape">Shape</label>
+      <select id="shape"><option value="1">Eyeball (curved onto the back wall)</option><option value="0">Flat block (as scanned)</option></select></div>
+    <div class="row eyeRow"><label for="nerve">Optic nerve drawn</label>
+      <select id="nerve"><option value="-1">on the left</option><option value="1">on the right</option><option value="0">hidden</option></select></div>
+    <div class="row eyeRow"><label for="shell">Eyeball wall</label><input id="shell" type="range" min="0" max="0.6" step="0.01" value="0.22"><output></output></div>
     <div class="row fusionRow"><label for="texMode">Surface shows</label>
       <select id="texMode"><option value="1">Fundus photo (lined up)</option><option value="0">OCT seen from above</option></select></div>
     <div class="row heatRow"><label for="redMode">Red shows</label>
@@ -119,8 +131,14 @@
     <div class="row"><label for="pinsOn">Numbered pins</label><input id="pinsOn" type="checkbox" checked></div>
 
     <h2>What this is, and is not</h2>
-    <div class="note"><strong>The shape is measured.</strong> Every point of the surface comes from the OCT scan, in
-      micrometres. "Stretch the depth" only makes the relief easier to see; at 1x the proportions are true.
+    <div class="note"><strong>Eyeball shape: the globe is a drawing, the patch is measured.</strong> The eyeball is a
+      standard 24 mm one with cornea, lens, iris and optic nerve drawn for orientation. NOT measured: this eye's size,
+      exactly where the scan sits on the back wall (assumed: centred on the back pole) and the side of the optic nerve
+      (choose it above; with a photo, the real one shows as the bright disc). Measured: the retina's thickness
+      everywhere in the patch, and where the photo lines up with the scan. The scan's own tilt is dropped here: its lower
+      surface lies on the wall and the inner surface rises by the measured thickness.</div>
+    <div class="note"><strong>Flat block shape: exactly as scanned.</strong> Every point of the surface comes from the OCT
+      scan, in micrometres. "Stretch the depth" only makes the relief easier to see; at 1x the proportions are true.
       <span id="spacingNote"></span></div>
     <div class="note"><strong>The surfaces are found by a classical method</strong> (strongest dark-to-bright edges, joined
       into smooth lines), not by a trained model. It can fail in shadows, very swollen retina, or at the optic disc. Check
@@ -195,12 +213,25 @@ function program(vsSource, fsSource) {
 // A measured surface. Each corner of the grid knows its position in the scan (aUV), its measured
 // depth in mm (aDepth), how steeply the surface slopes there (aSlope) and the thickness under it.
 const surface = program(`
-  attribute vec2 aUV; attribute float aDepth, aThick; attribute vec2 aSlope;
-  uniform mat4 uMVP; uniform vec3 uSize; uniform float uStretch;      // uSize = (width, length, depth that sits at height 0)
+  attribute vec2 aUV; attribute float aDepth, aThick; attribute vec2 aSlope, aThickSlope;
+  uniform mat4 uMVP; uniform vec3 uSize; uniform float uStretch, uR;  // uSize = (width, length, depth that sits at height 0); uR = eyeball radius
+  uniform bool uCurved, uLower;
   varying vec2 vUV; varying float vThick; varying vec3 vNormal;
   void main() {
     vUV = aUV; vThick = aThick;
-    // Height = -depth: deeper is lower. The surface's normal (the direction it faces) follows from its slopes.
+    if (uCurved) {
+      // Eyeball: l = position on the wall in mm from the patch centre. Its length, divided by the
+      // radius, is the angle from the back pole (so distances along the wall stay true).
+      vec2 l = vec2((aUV.x - 0.5) * uSize.x, (aUV.y - 0.5) * uSize.y);
+      float along = length(l), th = along / uR;
+      vec2 dir = along > 1e-6 ? l / along : vec2(0.0);
+      // The lower surface lies ON the wall; the inner surface is closer to the eye's centre by the thickness.
+      float r = uR - (uLower ? 0.0 : aThick / 1000.0 * uStretch);
+      vNormal = uLower ? vec3(0.0, 1.0, 0.0) : vec3(-uStretch * aThickSlope.x, 1.0, -uStretch * aThickSlope.y);
+      gl_Position = uMVP * vec4(sin(th) * dir.x * r, -sin(th) * dir.y * r, -cos(th) * r, 1.0);
+      return;
+    }
+    // Flat block. Height = -depth: deeper is lower. The surface's normal (the direction it faces) follows from its slopes.
     vNormal = vec3(uStretch * aSlope.x, 1.0, uStretch * aSlope.y);
     gl_Position = uMVP * vec4((aUV.x - 0.5) * uSize.x, (uSize.z - aDepth) * uStretch, (aUV.y - 0.5) * uSize.y, 1.0);
   }`, `
@@ -234,6 +265,34 @@ const slab = program(`
   void main() { vTex = aTex; gl_Position = uMVP * vec4(aPos, 1.0); }`, `
   precision mediump float; uniform sampler2D uScan; varying vec2 vTex;
   void main() { gl_FragColor = vec4(texture2D(uScan, vTex).rgb, 1.0); }`);
+// The whole photo on the eyeball's back wall (eyeball shape, when a photo was lined up).
+const wall = program(`
+  attribute vec3 aPos; attribute vec2 aTex; uniform mat4 uMVP; varying vec2 vTex;
+  void main() { vTex = aTex; gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; uniform sampler2D uPhoto, uHeat; uniform bool uHeatOn; uniform float uHeatThr, uOpacity; varying vec2 vTex;
+  void main() {
+    if (length(vTex - 0.5) > 0.485) discard;                   // outside the round picture
+    vec3 col = texture2D(uPhoto, vTex).rgb;
+    float h = texture2D(uHeat, vTex).r;
+    if (uHeatOn && h > uHeatThr) {
+      float t = (h - uHeatThr) / (1.0 - uHeatThr);
+      vec3 hot = t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8) : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2);
+      col = mix(col, hot, uOpacity * (0.45 + 0.55 * t));
+    }
+    gl_FragColor = vec4(col * 0.9, 1.0);
+  }`);
+// See-through parts drawn for orientation: eyeball wall, cornea, lens, iris, optic nerve.
+const glass = program(`
+  attribute vec3 aPos, aNormal; uniform mat4 uMVP; varying vec3 vPos, vN;
+  void main() { vPos = aPos; vN = aNormal; gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; uniform vec4 uColor; uniform vec3 uEye; uniform bool uCutaway; varying vec3 vPos, vN;
+  void main() {
+    vec3 n = normalize(vN), toEye = normalize(uEye - vPos);
+    // Cut-away: the half of the eyeball wall that faces the viewer is not drawn, so you always look inside.
+    if (uCutaway && dot(n, toEye) > 0.0) discard;
+    float rim = 1.0 - abs(dot(n, toEye));                      // edges-on parts look denser, like glass
+    gl_FragColor = vec4(uColor.rgb * (0.75 + 0.25 * abs(n.y)), uColor.a * (0.55 + 0.9 * rim));
+  }`);
 const lines = program(`
   attribute vec3 aPos; uniform mat4 uMVP;
   void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`, `
@@ -258,6 +317,37 @@ function slopes(grid) {         // how much the depth (mm) changes per mm sidewa
   return s;
 }
 const bufUV = buf(gl.ARRAY_BUFFER, uv), bufIndex = buf(gl.ELEMENT_ARRAY_BUFFER, index), bufThick = buf(gl.ARRAY_BUFFER, THICK);
+const bufThickSlope = buf(gl.ARRAY_BUFFER, slopes(THICK));
+
+// ---------------------------------------------------------------- the standard eyeball (a drawing, in mm)
+const R = 12;                                   // radius of a typical eyeball: 24 mm across
+// A shape made by spinning an outline around the eye's axis (z): outline = points (distance from the axis, z).
+function spun(outline, segments, tilt) {
+  const pos = [], nor = [], idx = [], n = outline.length, ca = Math.cos(tilt || 0), sa = Math.sin(tilt || 0);
+  for (let i = 0; i < n; i++) {
+    const a = outline[Math.max(0, i - 1)], b = outline[Math.min(n - 1, i + 1)];
+    let nr = b[1] - a[1], nz = -(b[0] - a[0]); const len = Math.hypot(nr, nz) || 1; nr /= len; nz /= len;   // outline's sideways direction = outward
+    for (let j = 0; j <= segments; j++) {
+      const t = j / segments * 2 * Math.PI, c = Math.cos(t), sn = Math.sin(t);
+      const p = [outline[i][0] * c, outline[i][0] * sn, outline[i][1]], q = [nr * c, nr * sn, nz];
+      pos.push(p[0] * ca + p[2] * sa, p[1], -p[0] * sa + p[2] * ca); nor.push(q[0] * ca + q[2] * sa, q[1], -q[0] * sa + q[2] * ca);   // tilt about the y axis
+    }
+  }
+  for (let i = 0; i < n - 1; i++) for (let j = 0; j < segments; j++) { const a = i * (segments + 1) + j, b = a + 1, c = a + segments + 1, d = c + 1; idx.push(a, c, b, b, c, d); }
+  return { pos: buf(gl.ARRAY_BUFFER, new Float32Array(pos)), nor: buf(gl.ARRAY_BUFFER, new Float32Array(nor)), idx: buf(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx)), count: idx.length };
+}
+const arc = (radius, centreZ, from, to, n) => Array.from({ length: n + 1 }, (_, i) => { const a = from + (to - from) * i / n; return [radius * Math.sin(a), centreZ + radius * Math.cos(a)]; });
+// Cornea: a steeper dome (radius 7.8) on the front; it meets the 12 mm globe in a circle 12 mm across at z = 10.4.
+const LIMBUS = Math.acos(10.4 / R);
+const anatomy = {
+  globe:  spun(arc(R, 0, Math.PI, LIMBUS, 64), 72),                         // from the back pole forward to the cornea's edge
+  cornea: spun(arc(7.8, 5.4, 0.001, Math.asin(5.99 / 7.8), 20), 72),
+  lens:   spun(Array.from({ length: 25 }, (_, i) => { const a = i / 24 * Math.PI; return [4.6 * Math.sin(a), 7.4 + 2.0 * Math.cos(a)]; }), 48),
+  iris:   spun([[1.9, 9.7], [5.95, 9.7]], 72),
+};
+const NERVE_ANGLE = 4.5 / R;                    // the optic nerve leaves ~4.5 mm (about 15 degrees) to the nose side of the centre
+const nerves = { "-1": spun([[1.7, -R + 0.15], [1.7, -R - 7]], 32, NERVE_ANGLE), "1": spun([[1.7, -R + 0.15], [1.7, -R - 7]], 32, -NERVE_ANGLE) };
+let wallMesh = null;                            // built at start when a photo was lined up
 const mesh = { ilm: { depth: buf(gl.ARRAY_BUFFER, ILM.map(v => v / 1000)), slope: buf(gl.ARRAY_BUFFER, slopes(ILM)) },
                low: { depth: buf(gl.ARRAY_BUFFER, LOW.map(v => v / 1000)), slope: buf(gl.ARRAY_BUFFER, slopes(LOW)) } };
 const bufSlab = gl.createBuffer(), bufLines = gl.createBuffer();
@@ -273,7 +363,8 @@ function makeTexture(image) {
 
 // ---------------------------------------------------------------- state and controls
 const state = { yaw: 0.6, pitch: 0.5, dist: 13, target: [0, 0, 0], dirty: true, sel: 0, probe: null };
-const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn", "texMode", "redMode", "heatThr"]) ui[id] = $(id);
+const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn", "texMode", "redMode", "heatThr", "shape", "nerve", "shell"]) ui[id] = $(id);
+const curved = () => ui.shape.value === "1";
 const F = D.fusion || null;                     // the photo (and heat) lined up with this scan, if oct3d.py was given one
 const SPOTS = F ? F.hot_spots : [];
 let photoTex = null, heatTex = null, heatPix = null;
@@ -283,6 +374,15 @@ const redraw = () => { state.dirty = true; };
 const stretch = () => Number(ui.stretch.value);
 const height = depthUm => (D0 - depthUm / 1000) * stretch();          // measured depth -> height in the 3D scene
 const worldOf = (u, v, depthUm) => [(u - 0.5) * W, height(depthUm), (v - 0.5) * L];
+// Eyeball shape: the point of the wall at scan position (u, v), `inward` mm closer to the eye's centre.
+function onWall(u, v, inward) {
+  const lx = (u - 0.5) * W, ly = (v - 0.5) * L, along = Math.hypot(lx, ly), th = along / R, r = R - inward, k = along > 1e-9 ? Math.sin(th) / along : 0;
+  return [lx * k * r, -ly * k * r, -Math.cos(th) * r];
+}
+// A point on the inner surface, lifted `lift` mm toward the inside of the eye, in the shape now shown.
+function surfacePoint(u, v, lift) {
+  return curved() ? onWall(u, v, at(THICK, u, v) / 1000 * stretch() + lift) : add(worldOf(u, v, at(ILM, u, v)), [0, lift, 0]);
+}
 const tMin = Math.min(...THICK), tMax = Math.max(...THICK);
 let enFaceTex = null; const sliceTex = [], sliceImg = [];
 const sliceV = () => (D.slices[Number(ui.slice.value)].scan + 0.5) / D.scans;
@@ -293,9 +393,11 @@ function syncOutputs() {
   ui.stretch.nextElementSibling.textContent = fmt(ui.stretch.value, 1) + "x";
   ui.slice.nextElementSibling.textContent = (D.slices[Number(ui.slice.value)].scan + 1) + " / " + D.scans;
   ui.heatThr.nextElementSibling.textContent = fmt(ui.heatThr.value * 100) + "%";
+  ui.shell.nextElementSibling.textContent = fmt(ui.shell.value * 100) + "%";
+  document.querySelectorAll(".eyeRow").forEach(e => e.style.display = curved() ? "" : "none");
   $("legendText").textContent = heatOn() ? "model evidence (from the photo): weak → strong" : `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm`;
 }
-for (const id in ui) ui[id].addEventListener("input", () => { if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); drawBscan(); redraw(); });
+for (const id in ui) ui[id].addEventListener("input", () => { if (id === "shape") { buildViews(); setView(curved() ? "eye" : "three"); } if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); drawBscan(); redraw(); });
 
 // ---------------------------------------------------------------- side panel
 function renderSide() {
@@ -349,7 +451,7 @@ function nearestSlice(scan) { let best = 0; D.slices.forEach((s, i) => { if (Mat
 function selectFinding(id) {
   state.sel = id; const f = D.findings.concat(SPOTS).find(f => f.id === id);
   ui.slice.value = nearestSlice(f.scan); state.probe = { u: f.u, v: f.v };
-  flyTo({ target: worldOf(f.u, f.v, at(ILM, f.u, f.v)), dist: 7, yaw: 0.5, pitch: 0.6 });
+  flyTo(curved() ? { target: surfacePoint(f.u, f.v, 0), dist: 8, yaw: 0.25, pitch: 0.2 } : { target: surfacePoint(f.u, f.v, 0), dist: 7, yaw: 0.5, pitch: 0.6 });
   renderSide(); syncOutputs(); drawBscan(); redraw();
 }
 
@@ -380,9 +482,26 @@ function camera() {
 }
 const far = Math.max(W, L) * 2.1;
 const VIEWS = { three: { target: [0, 0, 0], dist: far, yaw: 0.6, pitch: 0.5 }, top: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 1.5 },
-                front: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 0.12 } };
-function setView(name) { flight = null; Object.assign(state, JSON.parse(JSON.stringify(VIEWS[name]))); redraw(); }
-let flight = null;
+                front: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 0.12 },
+                // eyeball shape: the whole eye from the front-side; the patch from just inside; the eye from the side
+                eye: { target: [0, 0, 0], dist: 62, yaw: 0.75, pitch: 0.28 }, patch: { target: [0, 0, -R + 0.5], dist: 9, yaw: 0.3, pitch: -0.75 },
+                side: { target: [0, 0, 0], dist: 62, yaw: 1.45, pitch: 0.1 } };
+const VIEW_NAMES = { three: "3/4 view", top: "From above", front: "From the front", eye: "Whole eye", patch: "Zoom into the OCT patch", side: "Side" };
+let flight = null, viewNow = "eye";
+function setView(name, glide) {
+  viewNow = name; const goal = JSON.parse(JSON.stringify(VIEWS[name]));
+  if (glide) flyTo(goal); else { flight = null; Object.assign(state, goal); }
+  document.querySelectorAll("#views button").forEach(b => b.style.borderColor = b.dataset.view === name ? "var(--accent)" : "");
+  redraw();
+}
+function buildViews() {         // the buttons over the picture, for the shape now shown
+  const box = $("views"); box.innerHTML = "";
+  for (const name of curved() ? ["eye", "patch", "side"] : ["three", "top", "front"]) {
+    const b = document.createElement("button"); b.dataset.view = name; b.textContent = VIEW_NAMES[name];
+    b.onclick = () => setView(name, curved());                   // in the eyeball, glide between the whole eye and the patch
+    box.appendChild(b);
+  }
+}
 function flyTo(goal) {
   const from = { target: state.target.slice(), dist: state.dist, yaw: state.yaw, pitch: state.pitch }, t0 = performance.now();
   let dyaw = goal.yaw - from.yaw; dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));
@@ -400,6 +519,17 @@ function pick(clientX, clientY) {
   const nx = (clientX - box.left) / box.width * 2 - 1, ny = 1 - (clientY - box.top) / box.height * 2;
   const dir = norm(add(cam.fwd, add(mul(cam.right, nx * k * cam.aspect), mul(cam.up, ny * k))));
   const cutV = ui.cut.checked && ui.showSlice.checked ? sliceV() : 2;
+  if (curved()) {               // eyeball: turn each point of the ray back into a position on the wall, then compare radii
+    for (let t = 0.1; t < state.dist + 2 * R + 5; t += 0.01) {
+      const p = add(cam.eye, mul(dir, t)), r = Math.hypot(p[0], p[1], p[2]);
+      if (r < R - 4 || r > R + 0.5 || p[2] > 0) continue;
+      const side = Math.hypot(p[0], p[1]), along = Math.acos(Math.max(-1, Math.min(1, -p[2] / r))) * R, k = side > 1e-9 ? along / side : 0;
+      const u = p[0] * k / W + 0.5, v = -p[1] * k / L + 0.5;
+      if (u < 0 || u > 1 || v < 0 || v > 1 || v > cutV) continue;
+      if (r >= R - at(THICK, u, v) / 1000 * stretch()) return { u, v };
+    }
+    return null;
+  }
   for (let t = 0.1; t < state.dist * 3 + 20; t += 0.01) {
     const p = add(cam.eye, mul(dir, t)), u = p[0] / W + 0.5, v = p[2] / L + 0.5;
     if (u < 0 || u > 1 || v < 0 || v > 1 || v > cutV) continue;
@@ -426,20 +556,20 @@ canvas.addEventListener("pointermove", e => {
   const last = pointers.get(e.pointerId); if (!last) return;
   const dx = e.clientX - last[0], dy = e.clientY - last[1];
   pointers.set(e.pointerId, [e.clientX, e.clientY]); moved += Math.abs(dx) + Math.abs(dy);
-  if (pointers.size === 2) { const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) state.dist = Math.min(60, Math.max(1, state.dist * pinch / d)); pinch = d; }
-  else { flight = null; state.yaw -= dx * 0.006; state.pitch = Math.max(-0.2, Math.min(1.55, state.pitch + dy * 0.006)); }
+  if (pointers.size === 2) { const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) state.dist = Math.min(140, Math.max(1, state.dist * pinch / d)); pinch = d; }
+  else { flight = null; state.yaw -= dx * 0.006; state.pitch = Math.max(curved() ? -1.5 : -0.2, Math.min(1.55, state.pitch + dy * 0.006)); }
   redraw();
 });
 const release = e => { if (pointers.delete(e.pointerId) && e.type === "pointerup" && moved < 5 && pointers.size === 0) probe(pick(e.clientX, e.clientY)); if (!pointers.size) canvas.classList.remove("drag"); };
 canvas.addEventListener("pointerup", release); canvas.addEventListener("pointercancel", release);
-canvas.addEventListener("wheel", e => { e.preventDefault(); flight = null; state.dist = Math.min(60, Math.max(1, state.dist * Math.exp(e.deltaY * 0.0012))); redraw(); }, { passive: false });
-document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.view));
+canvas.addEventListener("wheel", e => { e.preventDefault(); flight = null; state.dist = Math.min(140, Math.max(1, state.dist * Math.exp(e.deltaY * 0.0012))); redraw(); }, { passive: false });
 
 // ---------------------------------------------------------------- drawing one frame
 function drawSurface(m, lower, cam) {
   gl.useProgram(surface);
   const U = n => gl.getUniformLocation(surface, n), A = (n, b, size) => { const loc = gl.getAttribLocation(surface, n); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0); };
-  A("aUV", bufUV, 2); A("aDepth", m.depth, 1); A("aSlope", m.slope, 2); A("aThick", bufThick, 1);
+  A("aUV", bufUV, 2); A("aDepth", m.depth, 1); A("aSlope", m.slope, 2); A("aThick", bufThick, 1); A("aThickSlope", bufThickSlope, 2);
+  gl.uniform1i(U("uCurved"), curved() ? 1 : 0); gl.uniform1f(U("uR"), R);
   gl.uniformMatrix4fv(U("uMVP"), false, cam.mvp); gl.uniform3f(U("uSize"), W, L, D0); gl.uniform1f(U("uStretch"), stretch());
   gl.uniform1f(U("uThr"), Number(ui.thr.value)); gl.uniform1f(U("uMax"), tMax); gl.uniform1f(U("uOpacity"), Number(ui.opacity.value));
   gl.uniform1i(U("uLower"), lower ? 1 : 0); gl.uniform1i(U("uCut"), ui.cut.checked && ui.showSlice.checked ? 1 : 0); gl.uniform1f(U("uCutV"), sliceV() + 0.25 / D.scans);
@@ -467,6 +597,17 @@ function frame(now) {
   const cam = camera(), s = stretch(), top = D0 * s, bottom = (D0 - DEPTH) * s;
   gl.viewport(0, 0, w, h); gl.clearColor(0.055, 0.067, 0.086, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+  if (curved() && wallMesh) {   // the whole photo on the back wall, just behind the patch
+    gl.useProgram(wall);
+    const UW = n => gl.getUniformLocation(wall, n), aPos = gl.getAttribLocation(wall, "aPos"), aTex = gl.getAttribLocation(wall, "aTex");
+    gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.pos); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.tex); gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 0, 0);
+    gl.uniformMatrix4fv(UW("uMVP"), false, cam.mvp); gl.uniform1i(UW("uHeatOn"), heatOn() && wallMesh.heat ? 1 : 0);
+    gl.uniform1f(UW("uHeatThr"), Number(ui.heatThr.value)); gl.uniform1f(UW("uOpacity"), Number(ui.opacity.value));
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, wallMesh.photo); gl.uniform1i(UW("uPhoto"), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, wallMesh.heat || wallMesh.photo); gl.uniform1i(UW("uHeat"), 1);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, wallMesh.idx); gl.drawElements(gl.TRIANGLES, wallMesh.count, gl.UNSIGNED_SHORT, 0);
+  }
   drawSurface(mesh.ilm, false, cam);
   if (ui.showLow.checked) drawSurface(mesh.low, true, cam);
 
@@ -478,7 +619,10 @@ function frame(now) {
     const strip = [], v = sliceV(), N = 96;
     for (let i = 0; i <= N; i++) {
       const u = i / N, dTop = Math.max(0, at(ILM, u, v) / 1000 - 0.04);
-      strip.push((u - 0.5) * W, (D0 - dTop) * s, z, u, dTop / DEPTH,  (u - 0.5) * W, bottom, z, u, 1);
+      if (curved()) {           // eyeball: the scan stands on the wall; its lower surface is at the wall, 0.3 mm of what lies below is shown
+        const low = at(LOW, u, v) / 1000, dBottom = Math.min(DEPTH, low + 0.3);
+        strip.push(...onWall(u, v, (low - dTop) * s), u, dTop / DEPTH,  ...onWall(u, v, (low - dBottom) * s), u, dBottom / DEPTH);
+      } else strip.push((u - 0.5) * W, (D0 - dTop) * s, z, u, dTop / DEPTH,  (u - 0.5) * W, bottom, z, u, 1);
     }
     const quad = new Float32Array(strip);
     gl.bindBuffer(gl.ARRAY_BUFFER, bufSlab); gl.bufferData(gl.ARRAY_BUFFER, quad, gl.DYNAMIC_DRAW);
@@ -494,18 +638,42 @@ function frame(now) {
   const box = [], X = W / 2, Z = L / 2;
   for (const y of [top, bottom]) box.push(-X, y, -Z, X, y, -Z,  X, y, -Z, X, y, Z,  X, y, Z, -X, y, Z,  -X, y, Z, -X, y, -Z);
   for (const [x, zz] of [[-X, -Z], [X, -Z], [X, Z], [-X, Z]]) box.push(x, top, zz, x, bottom, zz);
-  drawLines(box, [0.75, 0.82, 0.95, 0.22], cam);
-  if (ui.showSlice.checked) drawLines([-X, top, z, X, top, z,  X, top, z, X, bottom, z,  X, bottom, z, -X, bottom, z,  -X, bottom, z, -X, top, z], [0.42, 0.77, 1, 0.9], cam);
+  if (!curved()) drawLines(box, [0.75, 0.82, 0.95, 0.22], cam);
+  if (curved()) {               // the outline of the scanned patch on the wall
+    const edge = [], K = 40, corner = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    for (let c = 0; c < 4; c++) for (let i = 0; i < K; i++) for (const t of [i / K, (i + 1) / K]) {
+      const a = corner[c], b = corner[(c + 1) % 4]; edge.push(...onWall(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.02));
+    }
+    drawLines(edge, [0.42, 0.77, 1, 0.9], cam);
+  }
+  if (ui.showSlice.checked && !curved()) drawLines([-X, top, z, X, top, z,  X, top, z, X, bottom, z,  X, bottom, z, -X, bottom, z,  -X, bottom, z, -X, top, z], [0.42, 0.77, 1, 0.9], cam);
   const tips = [], stalks = [];
   for (const f of D.findings.concat(SPOTS)) {
-    const base = worldOf(f.u, f.v, at(ILM, f.u, f.v)), tip = add(base, [0, 0.12 * Math.max(W, L), 0]);
+    const base = surfacePoint(f.u, f.v, 0), tip = surfacePoint(f.u, f.v, 0.12 * Math.max(W, L));
     tips.push([f.id, tip]); stalks.push(...base, ...tip);
   }
-  if (state.probe) { const b = worldOf(state.probe.u, state.probe.v, at(ILM, state.probe.u, state.probe.v)); drawLines([...b, ...add(b, [0, 0.08 * Math.max(W, L), 0])], [1, 1, 1, 1], cam); }
+  if (state.probe) drawLines([...surfacePoint(state.probe.u, state.probe.v, 0), ...surfacePoint(state.probe.u, state.probe.v, 0.08 * Math.max(W, L))], [1, 1, 1, 1], cam);
   if (ui.pinsOn.checked) drawLines(stalks, [1, 0.35, 0.28, 0.9], cam);
+  if (curved()) {               // the see-through eyeball, drawn last and without writing depth, back parts first
+    gl.useProgram(glass); gl.depthMask(false);
+    const UG = n => gl.getUniformLocation(glass, n), aPos = gl.getAttribLocation(glass, "aPos"), aNor = gl.getAttribLocation(glass, "aNormal"), a = Number(ui.shell.value);
+    gl.uniformMatrix4fv(UG("uMVP"), false, cam.mvp); gl.uniform3fv(UG("uEye"), cam.eye);
+    const part = (m, color, cutaway) => {
+      gl.bindBuffer(gl.ARRAY_BUFFER, m.pos); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, m.nor); gl.enableVertexAttribArray(aNor); gl.vertexAttribPointer(aNor, 3, gl.FLOAT, false, 0, 0);
+      gl.uniform4fv(UG("uColor"), color); gl.uniform1i(UG("uCutaway"), cutaway ? 1 : 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, m.idx); gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+    };
+    if (ui.nerve.value !== "0") part(nerves[ui.nerve.value], [0.95, 0.85, 0.55, a * 1.6], false);
+    part(anatomy.globe, [0.86, 0.88, 0.95, a], true);
+    part(anatomy.iris, [0.35, 0.55, 0.75, a * 2.0], false);
+    part(anatomy.lens, [0.95, 0.93, 0.75, a * 1.2], false);
+    part(anatomy.cornea, [0.6, 0.85, 1.0, a * 0.9], true);
+    gl.depthMask(true);
+  }
   for (const [id, tip] of tips) {
     const el = document.querySelector(`.pin[data-id="${id}"]`); if (!el) continue;
-    if (typeof id === "string") tip[0] += 0.04 * Math.max(W, L);      // model hot spots (letters): nudged aside so a number stays visible
+    if (typeof id === "string") tip[0] += 0.05 * Math.max(W, L);      // model hot spots (letters): nudged aside so a number stays visible
     const m = cam.mvp, x = m[0] * tip[0] + m[4] * tip[1] + m[8] * tip[2] + m[12], y = m[1] * tip[0] + m[5] * tip[1] + m[9] * tip[2] + m[13], wc = m[3] * tip[0] + m[7] * tip[1] + m[11] * tip[2] + m[15];
     const on = wc > 0.05 && Math.abs(x / wc) < 1 && Math.abs(y / wc) < 1;
     el.style.display = on ? "" : "none";
@@ -527,11 +695,23 @@ function frame(now) {
       for (let i = 0; i < heatPix.data.length; i++) heatPix.data[i] = rgba[i * 4];
     }
   }
+  if (F && F.photo_full) {       // the whole photo, each of its points placed on the wall through the alignment
+    const m = F.registration.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0], G = 120, pos = [], tex = [], idx = [];
+    for (let j = 0; j <= G; j++) for (let i = 0; i <= G; i++) {
+      const x = i / G, y = j / G, dx = x - m[0][2], dy = y - m[1][2];
+      // the alignment maps scan (u, v) -> photo (x, y); here it is turned around: photo -> scan
+      const u = (m[1][1] * dx - m[0][1] * dy) / det, v = (-m[1][0] * dx + m[0][0] * dy) / det;
+      pos.push(...onWall(u, v, -0.03)); tex.push(x, y);
+    }
+    for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) { const a = j * (G + 1) + i, b = a + 1, c = a + G + 1, d = c + 1; idx.push(a, c, b, b, c, d); }
+    wallMesh = { pos: buf(gl.ARRAY_BUFFER, new Float32Array(pos)), tex: buf(gl.ARRAY_BUFFER, new Float32Array(tex)), idx: buf(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx)), count: idx.length,
+                 photo: makeTexture(await loadImage(F.photo_full)), heat: F.heat_full ? makeTexture(await loadImage(F.heat_full)) : null };
+  }
   document.querySelectorAll(".fusionRow").forEach(e => e.style.display = photoTex ? "" : "none");
   document.querySelectorAll(".heatRow").forEach(e => e.style.display = heatTex ? "" : "none");
   const images = await Promise.all(D.slices.map(s => loadImage(s.img)));
   images.forEach((im, i) => { sliceImg[i] = im; sliceTex[i] = makeTexture(im); });
-  setView("three"); renderSide(); syncOutputs(); drawBscan(); requestAnimationFrame(frame);
+  buildViews(); setView("eye"); renderSide(); syncOutputs(); drawBscan(); requestAnimationFrame(frame);
   window.addEventListener("resize", redraw);
 })();
 </script>

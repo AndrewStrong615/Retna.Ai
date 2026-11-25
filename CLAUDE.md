@@ -173,7 +173,14 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   onto the measured surface (page: "Surface shows" / "Red shows", alignment check picture, model hot spots A, B..
   with the retina thickness under each); refuses an untrusted match unless `--force-fusion`. The heat is computed on
   the flat photo (`eye3d.py` now writes `<run>/eye3d/heat/<name>.png`); photo and heat must be the same preprocessed
-  frame. `oct3d.py --demo` shows the fused cartoon pair (its heat is DRAWN, not from a model). Real data caveat:
+  frame. `oct3d.py --demo` shows the fused cartoon pair (its heat is DRAWN, not from a model).
+  Page shapes (switch under Display): "Eyeball" (default) = a see-through, cutaway globe of STANDARD size (24 mm;
+  cornea, lens, iris, optic nerve: a drawing, not this eye) with the whole registered photo and the OCT patch curved
+  onto the inner back wall: a point l mm from the patch centre sits at angle l/12 from the back pole (distances along
+  the wall kept), the lower surface lies ON the wall and the inner surface rises by the MEASURED thickness (x the
+  stretch slider); the scan's own tilt is dropped. Assumed: eye size, the patch centred on the back pole, the nerve's
+  side (chosen in the page). "Flat block" = exactly as scanned. Buttons: Whole eye / Zoom into the OCT patch / Side.
+  The curving is done in the page (WebGL), looked at in a browser on the demo; selftest checks only the page's data. Real data caveat:
   OLIVES pairs OCT with NEAR-INFRARED fundus pictures (as recalled; verify on download), not the colour photos the
   model was trained on: fine for testing registration, out of domain for the model's heat.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with

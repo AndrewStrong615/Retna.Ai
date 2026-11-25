@@ -800,6 +800,11 @@ def test_oct3d(tmp):
     check("oct3d.py --demo fuses: photo lined up and trusted, model hot spot A sits on the thickened retina",
           fused.get("registration", {}).get("trusted") is True and '"photo_on_scan"' in page
           and spot.get("thickness_um", 0) > 400 and abs(spot.get("x_mm", 0) - 1.5) < 0.15)
+    # Eyeball shape: the page needs the WHOLE photo and heat (they are wrapped onto the back wall around the
+    # measured patch) and the shape switch. The curving itself happens in the page (WebGL), so it is checked by
+    # eye in a browser, not here.
+    check("oct3d.py --demo page carries the whole photo + heat for the eyeball's back wall, and the shape switch",
+          '"photo_full"' in page and '"heat_full"' in page and 'id="shape"' in page and "uCurved" in page)
     # A real-style call with files: scan folder + photo of ANOTHER eye must be refused; --heat needs --photo.
     scan_dir = os.path.join(tmp, "oct_pair")
     os.makedirs(scan_dir)

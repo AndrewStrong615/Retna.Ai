@@ -25,7 +25,10 @@ What this script does with a volume, all hand-written, nothing learned:
      macular edema) are listed as numbered findings with size and volume.
   4. WRITE ONE WEB PAGE (<out>/viewer.html, no internet needed) with the real
      surface as a 3D shape you can turn, shaded red where the retina is thick,
-     a B-scan you can slide through the volume, and click-to-measure.
+     a B-scan you can slide through the volume, and click-to-measure. Two shapes:
+     the scan curved onto the back wall of a see-through standard eyeball (the
+     globe, cornea, lens and optic nerve are a DRAWING for orientation; the
+     thickness on it is measured), or the flat block exactly as scanned.
 
 WHAT IS REAL AND WHAT IS NOT:
   - The shape and the micrometres are measured from the scan (given the right
@@ -430,10 +433,13 @@ def fuse(vol, low, thick_um, spacing, photo_rgb, heat=None, photo_width_mm=13.0,
                                                       "photo_mm_per_width", "min_ncc", "min_ratio")},
                "heat_source": heat_source if heat is not None else None, "hot_spots": []}
     page = {"photo_on_scan": picture_url(reg.warp_to_scan(photo_rgb, found["matrix"]).astype(np.uint8), "JPEG", 88),
-            "registration_check": picture_url(reg.check_picture(photo_rgb, shadow, found["matrix"]))}
+            "registration_check": picture_url(reg.check_picture(photo_rgb, shadow, found["matrix"])),
+            # the whole photo (and heat), for the eyeball view's back wall
+            "photo_full": picture_url(np.asarray(Image.fromarray(photo_rgb).resize((512, 512), Image.Resampling.BILINEAR)), "JPEG", 88)}
     if heat is not None:
         on_scan = reg.warp_to_scan(heat, found["matrix"], 256) / 255.0           # 0..1 of the photo's strongest spot
         page["heat_on_scan"] = picture_url((on_scan * 255).round().astype(np.uint8))
+        page["heat_full"] = picture_url(np.asarray(Image.fromarray(heat).resize((256, 256), Image.Resampling.BILINEAR)))
         thick_256 = np.asarray(Image.fromarray(thick_um.astype(np.float32), mode="F")
                                .resize((256, 256), Image.Resampling.BILINEAR))
         labels, count = label_regions(on_scan >= hot)
