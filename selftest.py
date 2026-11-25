@@ -865,6 +865,15 @@ def test_photo2oct(tmp):
           abs(fovea[0] - fx) < 0.03 and abs(fovea[1] - fy) < 0.03 and disc[0] < 0.3 and nasal == "left" and contrast > 4
           and abs(u - fovea[0]) < 1e-6 and abs(v - fovea[1]) < 1e-6 and abs(matrix[0][0] - 6 / width_mm) < 1e-9,
           f"fovea {fovea[0]:.2f}, {fovea[1]:.2f} (drawn {fx:.2f}, {fy:.2f})")
+    # Points of interest: the cartoon photo has dark and yellow spots drawn at one place; vessels must not be marked.
+    lx, ly = reg.scan_to_photo(true_matrix, 0.75, 1 / 3)             # 1.5 mm right, 1 mm toward the first scan
+    spot_heat, spots = p2o.photo_spots(photo, disc, fovea)
+    clean = np.full((256, 256, 3), 0, np.uint8)
+    clean[np.hypot(*(np.mgrid[:256, :256] - 127.5)) < 120] = (200, 105, 60)
+    check("photo2oct: the spot filter marks the drawn spots (and only there), nothing on a plain eye",
+          len(spots) >= 2 and all(np.hypot(f["x"] - lx, f["y"] - ly) < 0.12 for f in spots) and spot_heat.max() == 255
+          and p2o.photo_spots(clean, (0.2, 0.5), (0.5, 0.5))[1] == [],
+          f"{len(spots)} spots, drawn at {lx:.2f}, {ly:.2f}")
     net = p2o.build_net().eval()
     with torch.no_grad():
         first = net(torch.randn(2, 3, 128, 128))
@@ -903,6 +912,11 @@ def test_photo2oct(tmp):
           and np.allclose(np.load(os.path.join(est, "thickness_um.npy")), p2o.atlas_thickness(64, info["nasal"]))
           and os.path.exists(os.path.join(est, "landmarks.png"))
           and json.load(open(os.path.join(est + "_net", "estimate.json")))["method"] == "network", (log + log3)[-300:])
+    points = info.get("points_of_interest", [])
+    check("photo2oct estimate: point of interest A sits on the drawn spots, with the estimated thickness under it; "
+          "the atlas alone reports no thickening",
+          len(points) >= 1 and points[0]["id"] == "A" and 200 < points[0]["thickness_um"] < 400
+          and '"heat_on_scan"' in page and info.get("thickened_vs_average") == [])
 
 
 def test_vit():

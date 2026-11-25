@@ -169,6 +169,56 @@ def landmarks_picture(rgb, disc, fovea, matrix, size=360):
     return np.asarray(img)
 
 
+def photo_spots(rgb, disc, fovea, min_z=8.0, work=512):
+    """
+    POINTS OF INTEREST in the photo, by a classical filter (nothing learned): small, roundish
+    spots that are clearly brighter or darker than their surroundings in the green channel.
+      1. fine picture (blur 1.5 px) minus coarse picture (blur ~13 px): what stands out locally;
+      2. measured in units of the photo's own typical variation (z; robust: median-based);
+      3. connected regions with |z| > 4 are kept only if they are COMPACT (a vessel is long and
+         thin: it fills little of the square around its length) and small, and their strongest
+         pixel reaches `min_z`;
+      4. left out: the optic disc and its surroundings, the rim of the picture, and the dark
+         fovea itself.
+    Returns (heat picture uint8 [work, work] with a soft blob per spot, strongest = 255; list
+    of spots with kind 'bright'/'dark', position 0..1 and z).
+    HONESTY: `min_z` 8 was set on ONE healthy photo (its strongest ordinary structure reached
+    z 7) and on cartoon spots (z 10-14). It has not met a real diseased photo. It marks
+    "something small stands out here", e.g. a hard exudate, a haemorrhage, but just as well a
+    reflection, dust on the lens or a pigment spot. It is not a diagnosis, and a clean result
+    does not mean a healthy eye. The disease model's own heat map (--heat) is the better source.
+    """
+    import math
+    from eye3d import label_regions
+    small = np.asarray(Image.fromarray(rgb).resize((work, work), Image.Resampling.BILINEAR))
+    inner = blurred(eye_area(small).astype(np.float32) * 255, work / 20) > 250
+    green = small[..., 1].astype(np.float32)
+    diff = blurred(green, 1.5) - blurred(green, work / 40)
+    yy, xx = np.mgrid[:work, :work]
+    ok = inner & (np.hypot(xx - disc[0] * work, yy - disc[1] * work) > 0.11 * work)
+    middle = np.median(diff[ok])
+    z = (diff - middle) / (1.4826 * np.median(np.abs(diff[ok] - middle)) + 1e-6)
+    spots, heat = [], np.zeros((work, work), np.float32)
+    for sign, kind in ((1, "bright"), (-1, "dark")):
+        labels, count = label_regions((sign * z > 4) & ok)
+        for k in range(1, count + 1):
+            py, px = np.nonzero(labels == k)
+            if len(py) < 6:
+                continue
+            length = 4 * math.sqrt(max(np.linalg.eigvalsh(np.cov(np.stack([px, py]).astype(np.float64)))[-1], 0.0))
+            peak = float((sign * z)[py, px].max())
+            x, y = float(px.mean() + 0.5) / work, float(py.mean() + 0.5) / work
+            at_fovea = kind == "dark" and np.hypot(x - fovea[0], y - fovea[1]) < 0.04
+            if peak < min_z or length > 0.06 * work or len(py) / (length ** 2 + 1e-8) < 0.35 or at_fovea:
+                continue
+            spots.append({"kind": kind, "x": x, "y": y, "z": peak})
+            blob = np.exp(-((xx - x * work) ** 2 + (yy - y * work) ** 2) / (2 * (0.02 * work) ** 2))
+            heat = np.maximum(heat, min(1.0, peak / 16) * blob)
+    if spots:
+        heat = heat / heat.max()
+    return (heat * 255).round().astype(np.uint8), sorted(spots, key=lambda f: -f["z"])
+
+
 # ---------------------------------------------------------------------------
 # 3. The network: photo of the macula -> difference from the atlas
 # ---------------------------------------------------------------------------
@@ -426,7 +476,7 @@ def drawn_volume(thick_um, vessel_mask=None, n_scans=64, width=256, depth=256, s
             (ilm_um / spacing["dz"] - 0.5).astype(np.float32), (low_um / spacing["dz"] - 0.5).astype(np.float32))
 
 
-def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False, log=print):
+def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False, log=print, heat_path=None):
     page_path = os.path.join(out, "viewer.html")
     if os.path.exists(page_path) and not overwrite:
         raise SystemExit(f"{page_path} exists. Pick a new --out or add --overwrite.")
@@ -460,22 +510,50 @@ def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False
         basis = ("the thickness map of an AVERAGE HEALTHY eye, placed on this photo's fovea. No model looked at the "
                  "photo's content: the same map would come out for a diseased eye. It cannot show swelling or thinning.")
 
+    # Points of interest in the photo: the disease model's heat map if one is given, else the classical spot filter.
+    if heat_path:
+        heat = np.asarray(Image.open(heat_path).convert("L").resize((512, 512), Image.Resampling.BILINEAR))
+        spots, heat_source = None, f"the disease model's heat map {os.path.basename(heat_path)} (computed on the flat photo)"
+    else:
+        heat, spots = photo_spots(rgb, disc, fovea)
+        heat_source = ("a classical filter for small spots that stand out (bright or dark; nothing learned, tuned on one "
+                       "healthy photo and on cartoons): a hint where to look, not a finding")
+        log(f"Points of interest (classical spot filter): {len(spots)}"
+            + "".join(f"\n  {f['kind']} spot at ({f['x']:.2f}, {f['y']:.2f}), {f['z']:.0f}x the photo's usual variation" for f in spots[:8]))
+
     vessels = reg.warp_to_scan(reg.photo_vessel_map(rgb), matrix, 256)
     vessels = vessels / (np.percentile(vessels, 99.5) + 1e-6)
     vol, spacing, ilm, low = drawn_volume(thick, vessels)
     source = f"ESTIMATED from the photo {os.path.basename(photo_path)} ({method}): not a scan"
     check = landmarks_picture(rgb, disc, fovea, matrix)
 
-    def fusion(_):
+    def fusion(thick_now):
         registration = {"matrix": matrix, "ncc": None, "control": None, "ratio": None, "trusted": True, "angle": 0.0,
                         "photo_mm_per_width": width_mm, "min_ncc": None, "min_ratio": None}
         page = {"photo_on_scan": oct3d.picture_url(np.clip(reg.warp_to_scan(rgb, matrix), 0, 255).astype(np.uint8), "JPEG", 88),
                 "registration_check": oct3d.picture_url(check),
                 "photo_full": oct3d.picture_url(np.asarray(Image.fromarray(rgb).resize((512, 512), Image.Resampling.BILINEAR)), "JPEG", 88)}
-        return page, {"registration": registration, "heat_source": None, "hot_spots": []}
+        on_scan = reg.warp_to_scan(heat, matrix, 256) / 255.0             # the heat over the estimated square
+        if heat.max() > 0:
+            page["heat_on_scan"] = oct3d.picture_url((on_scan * 255).round().astype(np.uint8))
+            page["heat_full"] = oct3d.picture_url(np.asarray(Image.fromarray(heat).resize((256, 256), Image.Resampling.BILINEAR)))
+        # each point of interest with the ESTIMATED thickness under it
+        hot = oct3d.heat_spots(on_scan, thick_now, spacing, vol.shape[0], vol.shape[2])
+        return page, {"registration": registration, "heat_source": heat_source, "hot_spots": hot}
 
     page, summary, thick_full = oct3d.build_page_data(vol, spacing, ilm, low, source, fusion=fusion)
-    info = {"method": method, "basis": basis, "photo": os.path.basename(photo_path),
+    # "Thickened" for an estimate = clearly thicker than the AVERAGE eye at the same place (more than 50 um above the
+    # atlas), not "thicker than the rest of this scan": the atlas alone can therefore never produce one.
+    atlas_full = np.asarray(Image.fromarray(atlas_thickness(OUT_PX, nasal), mode="F")
+                            .resize(thick_full.shape[::-1], Image.Resampling.BILINEAR))
+    findings, _ = oct3d.thick_findings(thick_full - atlas_full, spacing, 50.0)
+    for f in findings:
+        row, col = int(f["v"] * thick_full.shape[0]), int(f["u"] * thick_full.shape[1])
+        f["excess_um"] = f["peak_um"]                                     # how far above the average eye, at its peak
+        f["peak_um"] = float(thick_full[row, col])
+    page["findings"] = summary["findings"] = findings
+    info = {"method": method, "basis": basis, "points_of_interest": summary["fusion"]["hot_spots"],
+            "points_source": heat_source, "spots_whole_photo": spots, "thickened_vs_average": findings, "photo": os.path.basename(photo_path),
             "disc": list(disc), "fovea": list(fovea), "landmarks_typed": typed, "fovea_contrast": contrast, "nasal": nasal,
             "assumed": {"disc_fovea_mm": DISC_FOVEA_MM, "photo_width_mm": width_mm, "field_mm": FIELD_MM,
                         "eye_wall": "drawn flat; a photo says nothing about its curve or tilt",
@@ -494,6 +572,12 @@ def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False
         json.dump(info, f, indent=2)
     t = summary["thickness_um"]
     log(f"ESTIMATE ({method}): centre (1 mm) {t['central_1mm']:.0f} um, thinnest {t['min']:.0f}, thickest {t['max']:.0f}. Rests on: {basis}")
+    for f in summary["fusion"]["hot_spots"]:
+        log(f"  point of interest {f['id']}: {abs(f['x_mm']):.1f} mm {'right' if f['x_mm'] >= 0 else 'left'} of and "
+            f"{abs(f['y_mm']):.1f} mm {'below' if f['y_mm'] >= 0 else 'above'} the fovea (as the photo is shown); "
+            f"estimated retina under it {f['thickness_um']:.0f} um")
+    for f in findings:
+        log(f"  estimated thickening #{f['id']}: {f['excess_um']:.0f} um above the average eye, {f['area_mm2']:.1f} mm2")
     log(f"Open in a browser: {page_path}  (it embeds the photo: do not commit it). Check {os.path.join(out, 'landmarks.png')} first.")
     return info
 
@@ -531,6 +615,8 @@ def main():
     e.add_argument("--model", help="a model.pt from `train` (without it: the average healthy map)")
     e.add_argument("--disc", nargs=2, type=float, metavar=("X", "Y"), help="disc centre as fractions 0..1, if the automatic one is wrong")
     e.add_argument("--fovea", nargs=2, type=float, metavar=("X", "Y"))
+    e.add_argument("--heat", help="the disease model's heat map for this photo (gray picture, same frame; eye3d.py writes "
+                                  "them to <run>/eye3d/heat/). Without it: a classical spot filter marks points of interest")
     e.add_argument("--overwrite", action="store_true")
     s = sub.add_parser("synthetic-pairs", help="cartoon pairs with a known rule, to test the code")
     s.add_argument("--out", required=True)
@@ -551,7 +637,7 @@ def main():
     t.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
     if args.cmd == "estimate":
-        estimate(args.photo, args.out, args.model, args.disc, args.fovea, args.overwrite)
+        estimate(args.photo, args.out, args.model, args.disc, args.fovea, args.overwrite, heat_path=args.heat)
     elif args.cmd == "synthetic-pairs":
         for i in range(args.eyes):                                        # two eyes per cartoon patient
             crop, thick, _ = synthetic_pair(i)

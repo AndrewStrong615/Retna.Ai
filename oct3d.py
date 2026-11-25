@@ -424,6 +424,35 @@ def resample_rows_cols(surface, rows, cols):
     return np.stack([surface[:, a:b].mean(axis=1) for a, b in zip(edges[:-1], edges[1:])], axis=1)
 
 
+def heat_spots(on_scan, thick_um, spacing, n, width, hot=0.5):
+    """
+    Hot spots of a heat map that already lies on the scan's square (`on_scan`, 256 x 256, 0..1):
+    connected regions at or above `hot`, strongest first, lettered A, B, ... (at most 8). For
+    each: where it is, how big, and the retina thickness under it (heat-weighted mean, and max).
+    """
+    thick_256 = np.asarray(Image.fromarray(thick_um.astype(np.float32), mode="F")
+                           .resize((256, 256), Image.Resampling.BILINEAR))
+    labels, count = label_regions(on_scan >= hot)
+    cell_mm2 = (width * spacing["dx"] / 1000 / 256) * (n * spacing["dy"] / 1000 / 256)
+    spots = []
+    for k in range(1, count + 1):
+        region = labels == k
+        if region.sum() * cell_mm2 < 0.02:
+            continue
+        w = on_scan[region]
+        vs, us = np.nonzero(region)
+        u, v = float(((us + 0.5) * w).sum() / w.sum() / 256), float(((vs + 0.5) * w).sum() / w.sum() / 256)
+        spots.append({"u": u, "v": v, "scan": int(min(n - 1, v * n)),
+                      "x_mm": (u - 0.5) * width * spacing["dx"] / 1000, "y_mm": (v - 0.5) * n * spacing["dy"] / 1000,
+                      "area_mm2": float(region.sum() * cell_mm2), "peak_heat": float(w.max()),
+                      "thickness_um": float((thick_256[region] * w).sum() / w.sum()),
+                      "thickness_max_um": float(thick_256[region].max()), "_mass": float(w.sum())})
+    spots.sort(key=lambda f: -f.pop("_mass"))
+    for letter, f in zip("ABCDEFGH", spots):
+        f["id"] = letter
+    return spots[:8]
+
+
 def fuse(vol, low, thick_um, spacing, photo_rgb, heat=None, photo_width_mm=13.0, heat_source="", hot=0.5):
     """
     Line the photo up with the scan (register.py) and carry the photo, and its heat map if
@@ -446,27 +475,8 @@ def fuse(vol, low, thick_um, spacing, photo_rgb, heat=None, photo_width_mm=13.0,
         on_scan = reg.warp_to_scan(heat, found["matrix"], 256) / 255.0           # 0..1 of the photo's strongest spot
         page["heat_on_scan"] = picture_url((on_scan * 255).round().astype(np.uint8))
         page["heat_full"] = picture_url(np.asarray(Image.fromarray(heat).resize((256, 256), Image.Resampling.BILINEAR)))
-        thick_256 = np.asarray(Image.fromarray(thick_um.astype(np.float32), mode="F")
-                               .resize((256, 256), Image.Resampling.BILINEAR))
-        labels, count = label_regions(on_scan >= hot)
-        cell_mm2 = (width * spacing["dx"] / 1000 / 256) * (n * spacing["dy"] / 1000 / 256)
-        spots = []
-        for k in range(1, count + 1):
-            region = labels == k
-            if region.sum() * cell_mm2 < 0.02:
-                continue
-            w = on_scan[region]
-            vs, us = np.nonzero(region)
-            u, v = float(((us + 0.5) * w).sum() / w.sum() / 256), float(((vs + 0.5) * w).sum() / w.sum() / 256)
-            spots.append({"u": u, "v": v, "scan": int(min(n - 1, v * n)),
-                          "x_mm": (u - 0.5) * width * spacing["dx"] / 1000, "y_mm": (v - 0.5) * n * spacing["dy"] / 1000,
-                          "area_mm2": float(region.sum() * cell_mm2), "peak_heat": float(w.max()),
-                          "thickness_um": float((thick_256[region] * w).sum() / w.sum()),
-                          "thickness_max_um": float(thick_256[region].max()), "_mass": float(w.sum())})
-        spots.sort(key=lambda f: -f.pop("_mass"))
-        for letter, f in zip("ABCDEFGH", spots):
-            f["id"] = letter
-        summary["hot_spots"] = spots[:8]
+        spots = heat_spots(on_scan, thick_um, spacing, n, width, hot)
+        summary["hot_spots"] = spots
         summary["heat_outside_scan_pct"] = 100 * float(1 - on_scan.sum() * (heat.size / 256 ** 2) *
                                                        abs(np.linalg.det(np.array(found["matrix"])[:, :2]))
                                                        / (heat.sum() / 255.0 + 1e-8))

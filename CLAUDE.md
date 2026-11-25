@@ -216,6 +216,12 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   `estimate --photo P --out D [--model M] [--disc x y --fovea x y]`: writes thickness_um.npy, landmarks.png (check it),
   estimate.json and the oct3d page with `estimate` data: a banner "ESTIMATED from a photo", all "measured" texts
   replaced; its B-scans are DRAWN from the estimate (layers at fixed fractions, shadows under the photo's vessels).
+  POINTS OF INTEREST on the estimate (yellow letters A, B.., each with the ESTIMATED thickness under it): from
+  `--heat` (the disease model's heat picture from eye3d.py) or, without it, `photo_spots`: a classical filter for small
+  compact spots that stand out in the green channel (>= 8 robust SDs; vessels dropped as long and thin; disc, rim and
+  the fovea's own dark spot left out). The 8 was set on ONE healthy photo (its strongest ordinary structure: 7) and on
+  cartoon spots (10-14): never tried on a real diseased photo; a hint where to look, not a finding. "Thickened" on an
+  estimate page = more than 50 um above the ATLAS at that place (so the atlas alone never reports one).
   Assumed: disc-fovea 4.5 mm (sets every mm), flat eye wall. First real photo tried: scikit-image's sample retina
   (Wikimedia Commons "Fundus photograph of normal left eye", Haggstrom, CC0): landmarks right, atlas centre 275 um.
   Real pairs, licences checked 2026-11-25: OLIVES (Zenodo 7105232, CC BY 4.0, 33.9 GB, 96 DR/DME eyes, 1,268 NEAR-INFRARED

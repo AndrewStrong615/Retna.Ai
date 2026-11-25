@@ -573,7 +573,7 @@ function syncOutputs() {
   document.querySelectorAll(".flatRow").forEach(e => e.style.display = curved() ? "none" : "");
   $("hint").textContent = "Drag to turn · wheel or pinch to zoom · click the " + (curved() ? "scanned patch" : "surface") + " to measure a spot";
   const lb = $("labelButton"); if (lb) lb.textContent = ui.labelsOn.checked ? "Hide names" : "Show names";
-  $("legendText").textContent = heatOn() ? "model evidence (from the photo): weak → strong" : ui.redMode.value === "0" ? `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm` : "no tint: the data's own colours";
+  $("legendText").textContent = heatOn() ? (D.estimate ? "points of interest in the photo: weak → strong" : "model evidence (from the photo): weak → strong") : ui.redMode.value === "0" ? `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm` : "no tint: the data's own colours";
   $("legend").querySelector("i").style.display = ui.redMode.value === "-1" ? "none" : "";
   if (scanOnly()) $("hudRelief").textContent += " · grid: 1 mm squares along the wall" + (ui.estRelief.checked && wallMesh ? " · photo relief is GUESSED, not measured" : "");
 }
@@ -582,6 +582,10 @@ for (const id in ui) ui[id].addEventListener("input", () => { if (id === "shape"
 function shapeDefaults() {
   const plain = scanOnly();
   ui.redMode.value = plain ? "-1" : heatTex ? "1" : "0"; ui.shade.checked = !plain; ui.pinsOn.checked = !plain;
+  if (D.estimate && (SPOTS.length || D.findings.length)) {   // an estimate with something to point at: pins on, heat tinted
+    ui.pinsOn.checked = true;
+    if (SPOTS.length && heatTex) ui.redMode.value = "1";
+  }
   $("pins").style.display = ui.pinsOn.checked ? "" : "none";
 }
 for (const [id, value] of [["relief1", 1], ["relief5", 5]]) $(id).onclick = () => { ui.stretch.value = value; syncOutputs(); redraw(); };
@@ -595,14 +599,16 @@ function showEstimate() {
   if (!E || estimateShown) return;
   estimateShown = true;
   const a = E.assumed, how = E.method === "network" ? "a trained network's guess" : "the average healthy eye, not this eye";
+  ui.redMode.options[1].textContent = "Points of interest (from the photo)";
+  ui.redMode.options[2].textContent = "Retina thickness (estimated)";
   $("estBanner").style.display = "";
   $("estBanner").textContent = `ESTIMATED from a photo (${how}) · not a scan · not a measurement`;
   document.querySelector("#side h1").textContent = "Estimated OCT view";
   document.title = "Estimated OCT view";
   document.querySelectorAll("#side h2").forEach(h => {
     if (h.textContent.startsWith("Photo lined up")) h.textContent = "Where the estimate sits in the photo";
-    if (h.textContent.startsWith("Model hot spots")) { h.style.display = "none"; $("hotspots").style.display = "none"; }
-    if (h.textContent.startsWith("Thickened areas")) h.textContent = "Thickened areas (in the ESTIMATE, not measured)";
+    if (h.textContent.startsWith("Model hot spots")) h.textContent = "Points of interest (from the photo)";
+    if (h.textContent.startsWith("Thickened areas")) h.textContent = "Thicker than the average eye (ESTIMATED, not measured)";
     if (h.textContent.startsWith("B-scan")) h.textContent = "B-scan (DRAWN from the estimate, not data)";
     if (h.textContent.startsWith("What this is")) {
       for (let n = h.nextElementSibling; n; n = n.nextElementSibling) if (n.classList.contains("note")) n.style.display = "none";
@@ -612,6 +618,7 @@ function showEstimate() {
         `<br><br><strong>From the photo:</strong> its own colours, and WHERE the map sits (optic disc and fovea found ${E.landmarks_typed ? "by hand" : "by a classical filter"}; check the picture above: circle = disc, cross = fovea, square = the estimated ${fmt(a.field_mm)} x ${fmt(a.field_mm)} mm). ` +
         `<br><br><strong>Assumed:</strong> disc to fovea = ${fmt(a.disc_fovea_mm, 1)} mm (sets every mm here; the photo's width is then ${fmt(a.photo_width_mm, 1)} mm); the eye wall under the retina is ${a.eye_wall}; the curve of the shell. ` +
         `<br><br><strong>The B-scans are drawings:</strong> layers ${a.layers}. The dark stripes are placed under the photo's vessels. Do not read layers, fluid or any finding off them.` +
+        `<br><br><strong>Points of interest</strong> (yellow letters) come from the PHOTO: ${E.points_source}. The thickness quoted under each is the estimate at that place, not a measurement.` +
         `<br><br>Only a real OCT scan can show this eye's thickness. This is a teaching picture, not a diagnosis.`;
       h.after(d);
     }
@@ -636,8 +643,9 @@ function renderSide() {
   D.findings.forEach(f => {
     const d = document.createElement("div");
     d.className = "finding" + (f.id === state.sel ? " sel" : "");
-    d.innerHTML = `<b>#${f.id}</b> · up to ${fmt(f.peak_um)} µm thick · ${fmt(f.area_mm2, 2)} mm²` +
-      `<small>${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1} · extra volume ${fmt(f.extra_volume_mm3, 3)} mm³ above ${fmt(D.threshold_um)} µm</small>`;
+    d.innerHTML = (D.estimate ? `<b>#${f.id}</b> · estimated ${fmt(f.peak_um)} µm, ${fmt(f.excess_um)} µm above the average eye · ${fmt(f.area_mm2, 2)} mm²<small>${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of the fovea</small>` :
+      `<b>#${f.id}</b> · up to ${fmt(f.peak_um)} µm thick · ${fmt(f.area_mm2, 2)} mm²` +
+      `<small>${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1} · extra volume ${fmt(f.extra_volume_mm3, 3)} mm³ above ${fmt(D.threshold_um)} µm</small>`);
     d.onclick = () => selectFinding(f.id);
     box.appendChild(d);
   });
@@ -651,12 +659,12 @@ function renderSide() {
     showEstimate();
     if (D.estimate) $("regText").innerHTML = `<span class="tag bad">estimated</span> The square is placed on the fovea by construction (no vessel matching was needed or done).`;
     const hb = $("hotspots");
-    hb.innerHTML = F.heat_source ? (SPOTS.length ? "" : "<div class='note'>No hot spot of the heat map falls inside the scanned square.</div>") : "<div class='note'>No heat map was given (--heat).</div>";
+    hb.innerHTML = F.heat_source ? (SPOTS.length ? "" : `<div class='note'>${D.estimate ? "Nothing in the square stands out enough to mark. That is not a statement that the eye is healthy." : "No hot spot of the heat map falls inside the scanned square."}</div>`) : "<div class='note'>No heat map was given (--heat).</div>";
     SPOTS.forEach(f => {
       const d = document.createElement("div"), diff = f.thickness_um - D.thickness_um.median;
       d.className = "finding" + (f.id === state.sel ? " sel" : "");
-      d.innerHTML = `<b style="color:#ffd84d">${f.id}</b> · heat ${fmt(f.peak_heat * 100)}% · retina under it ${fmt(f.thickness_um)} µm` +
-        `<small>${diff >= 0 ? "+" : ""}${fmt(diff)} µm vs this scan's median · up to ${fmt(f.thickness_max_um)} µm · ${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1}</small>`;
+      d.innerHTML = `<b style="color:#ffd84d">${f.id}</b> · ${D.estimate ? "stands out" : "heat"} ${fmt(f.peak_heat * 100)}% · retina under it ${fmt(f.thickness_um)} µm${D.estimate ? " (estimated)" : ""}` +
+        `<small>${diff >= 0 ? "+" : ""}${fmt(diff)} µm vs ${D.estimate ? "the estimate's" : "this scan's"} median · up to ${fmt(f.thickness_max_um)} µm · ${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1}</small>`;
       d.onclick = () => selectFinding(f.id);
       hb.appendChild(d);
     });
