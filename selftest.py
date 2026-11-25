@@ -807,6 +807,12 @@ def test_oct3d(tmp):
           "the cut-open eye's switches (cut, part names) and the 1x-5x relief slider",
           '"photo_full"' in page and '"heat_full"' in page and 'id="shape"' in page and "uCurved" in page
           and 'id="cutOpen"' in page and 'id="labelsOn"' in page and 'id="stretch" type="range" min="1" max="5"' in page)
+    # The default shape is "Scan only": nothing drawn, only the photo and the OCT on a curved shell. The page must
+    # offer it first, keep the guessed photo relief behind its own switch (unticked = off) and carry the lighting switch.
+    check("oct3d.py --demo page opens on the scan-only shape, with the guessed relief switched off and labelled",
+          '<select id="shape"><option value="2">Scan only' in page
+          and '<input id="estRelief" type="checkbox"><span class="tag">estimated</span>' in page
+          and '<input id="shade" type="checkbox">' in page and "uScanOnly" in page)
     # A real-style call with files: scan folder + photo of ANOTHER eye must be refused; --heat needs --photo.
     scan_dir = os.path.join(tmp, "oct_pair")
     os.makedirs(scan_dir)

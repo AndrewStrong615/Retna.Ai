@@ -9,7 +9,14 @@
   y = up (toward the inside of the eye), multiplied by the "stretch" slider,
   because a retina is ~0.3 mm thick and 6 mm wide and looks flat at true scale.
 
-  Two shapes are offered ("Shape" in the Display section):
+  Three shapes are offered ("Shape" in the Display section):
+    - SCAN ONLY (default): nothing is drawn that does not come from the data. The photo (its own
+      colours, no tint, no lighting) and the OCT patch are curved onto a shell of radius 11 mm (the
+      retina's place in a standard 24 mm eye: an ASSUMED curve, the scan does not measure it), on a
+      dark background with a faint 1 mm grid. Inside the scanned square the height is the measured
+      thickness, and the cut edges show the OCT's own cross-sections. Outside it nothing measures
+      height: the photo lies at the scan's median thickness, its rim is plain grey. An optional,
+      clearly labelled switch adds relief GUESSED from the photo's brightness (not measured).
     - EYEBALL: a textbook-style cutaway of a standard 24 mm eye. The top-front quarter is cut
       away, and the cut faces show the three coats of the wall (white sclera, dark red choroid,
       peach retina). In front: cornea, anterior chamber, iris with pupil, pleated ciliary body,
@@ -132,15 +139,17 @@
 
     <h2>Display</h2>
     <div class="row"><label for="shape">Shape</label>
-      <select id="shape"><option value="1">Eyeball (curved onto the back wall)</option><option value="0">Flat block (as scanned)</option></select></div>
+      <select id="shape"><option value="2">Scan only (curved, nothing drawn)</option><option value="1">Textbook eye (drawn eye around the scan)</option><option value="0">Flat block (as scanned)</option></select></div>
     <div class="row eyeRow"><label for="nerve">Optic nerve drawn</label>
       <select id="nerve"><option value="-1">on the left</option><option value="1">on the right</option><option value="0">hidden</option></select></div>
     <div class="row eyeRow"><label for="cutOpen">Cut the eye open</label><input id="cutOpen" type="checkbox" checked></div>
     <div class="row eyeRow"><label for="labelsOn">Part names</label><input id="labelsOn" type="checkbox" checked></div>
-    <div class="row fusionRow"><label for="texMode">Surface shows</label>
-      <select id="texMode"><option value="1">Fundus photo (lined up)</option><option value="0">OCT seen from above</option></select></div>
-    <div class="row heatRow"><label for="redMode">Red shows</label>
-      <select id="redMode"><option value="1">Model heat (from the photo)</option><option value="0">Retina thickness (measured)</option></select></div>
+    <div class="row"><label for="texMode">Surface shows</label>
+      <select id="texMode"><option value="1">True photo colours</option><option value="0">OCT seen from above (grey)</option><option value="2">OCT depth in grey (thick = bright)</option></select></div>
+    <div class="row"><label for="redMode">Red tint</label>
+      <select id="redMode"><option value="-1">None (true colours)</option><option value="1">Model heat (from the photo)</option><option value="0">Retina thickness (measured)</option></select></div>
+    <div class="row"><label for="shade">Light the relief</label><input id="shade" type="checkbox"></div>
+    <div class="row scanRow"><label for="estRelief">Guess relief from photo</label><input id="estRelief" type="checkbox"><span class="tag">estimated</span></div>
     <div class="row heatRow"><label for="heatThr">Hide heat below</label><input id="heatThr" type="range" min="0" max="0.95" step="0.01" value="0.2"><output></output></div>
     <div class="row"><label for="thr">Thick above</label><input id="thr" type="range" step="1"><output></output></div>
     <div class="row"><label for="opacity">Red strength</label><input id="opacity" type="range" min="0" max="1" step="0.01" value="0.85"><output></output></div>
@@ -152,7 +161,18 @@
     <div class="row"><label for="pinsOn">Numbered pins</label><input id="pinsOn" type="checkbox" checked></div>
 
     <h2>What this is, and is not</h2>
-    <div class="note"><strong>Eyeball shape: the eye is a textbook drawing, the patch is measured.</strong> Sclera, choroid,
+    <div class="note"><strong>Scan only: every colour and every height comes from the data, the curve does not.</strong>
+      Colours are the photo's own pixels (or the OCT's grey values). Inside the scanned square the surface rises by the
+      measured retina thickness, and the cut edges show the OCT's own cross-sections with its real layers. NOT measured:
+      the curve itself (a ball of radius 11 mm, where the retina lies in a standard 24 mm eye; the OCT's own tilt is
+      dropped), where the square sits on it, and any height OUTSIDE the square: there the photo is laid at the scan's
+      median thickness and its rim is plain grey, because one photo holds no depth. "Light the relief" adds shading so the
+      shape is easier to see; it darkens colours, so it is off by default here.</div>
+    <div class="note"><strong>"Guess relief from photo" is an estimate, not a measurement.</strong> It raises thin dark
+      lines (vessels) and lowers the brightest area (the optic disc) of the photo, from brightness alone. Real vessels
+      are not that much raised and a bright disc is not always a deep one. Use it to look, never to measure; clicks keep
+      reporting only the OCT's numbers.</div>
+    <div class="note"><strong>Textbook eye: the eye is a drawing, the patch is measured.</strong> Sclera, choroid,
       cornea, iris, ciliary body, zonules, lens, muscles and optic nerve are a standard 24 mm eye drawn for orientation,
       the same for every scan; the coats of the wall are drawn thicker than life so their colours can be seen. NOT
       measured: this eye's size, exactly where the scan sits on the back wall (assumed: centred on the back pole) and the
@@ -264,20 +284,22 @@ const surface = program(`
   }`, `
   precision mediump float;
   uniform sampler2D uEnFace, uPhoto, uHeat; uniform float uThr, uMax, uOpacity, uCutV, uHeatThr;
-  uniform bool uCut, uLower, uCurved; uniform int uTexMode, uRedMode;
+  uniform bool uCut, uLower, uCurved, uShade, uScanOnly; uniform int uTexMode, uRedMode; uniform float uMin;
   varying vec2 vUV; varying float vThick; varying vec3 vNormal;
   void main() {
     if (uCut && vUV.y > uCutV) discard;                        // cut away what is in front of the B-scan
-    float light = 0.40 + 0.60 * abs(dot(normalize(vNormal), normalize(vec3(0.35, 0.85, 0.40))));
+    float light = uShade ? 0.40 + 0.60 * abs(dot(normalize(vNormal), normalize(vec3(0.35, 0.85, 0.40)))) : 1.0;   // no lighting = the data's own colours
     vec3 col;
-    if (uLower) col = uCurved ? vec3(0.50, 0.20, 0.16) : vec3(0.62, 0.46, 0.26);   // eyeball: the dark layer under the retina
+    if (uLower) col = uScanOnly ? vec3(0.12 + 0.55 * texture2D(uEnFace, vUV).r)      // scan only: the OCT seen from above, in grey
+                    : uCurved ? vec3(0.50, 0.20, 0.16) : vec3(0.62, 0.46, 0.26);   // textbook eye: the dark layer under the retina
     else {
       if (uTexMode == 1) col = texture2D(uPhoto, vUV).rgb;                       // the fundus photo, lined up with the scan
+      else if (uTexMode == 2) col = vec3(clamp((vThick - uMin) / max(uMax - uMin, 1.0), 0.0, 1.0));   // measured thickness as grey
       else col = vec3(0.80, 0.76, 0.74) * (0.45 + 0.55 * texture2D(uEnFace, vUV).r);   // the scan seen from above
       // What is painted red: the measured thickness, or the model's heat carried over from the photo.
       float t = -1.0;
       if (uRedMode == 1) { float h = texture2D(uHeat, vUV).r; if (h > uHeatThr) t = (h - uHeatThr) / (1.0 - uHeatThr); }
-      else if (vThick > uThr) t = clamp((vThick - uThr) / max(uMax - uThr, 1.0), 0.0, 1.0);
+      else if (uRedMode == 0 && vThick > uThr) t = clamp((vThick - uThr) / max(uMax - uThr, 1.0), 0.0, 1.0);
       if (t >= 0.0) {
         vec3 hot = t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8)
                            : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2);
@@ -310,9 +332,10 @@ const PRECISION = `
 // The whole photo on the eyeball's back wall (eyeball shape, when a photo was lined up). Each corner
 // stores only its DIRECTION from the eye's centre; uRad says how far out (the retina's inner surface).
 const wall = program(`
-  attribute vec3 aPos; attribute vec2 aTex; uniform mat4 uMVP; uniform float uRad; varying vec2 vTex; varying vec3 vPos;
-  void main() { vTex = aTex; vPos = aPos * uRad; gl_Position = uMVP * vec4(vPos, 1.0); }`, PRECISION + ON_SCAN + `
-  uniform sampler2D uPhoto, uHeat; uniform bool uHeatOn; uniform float uHeatThr, uOpacity; varying vec2 vTex; varying vec3 vPos;
+  attribute vec3 aPos; attribute vec2 aTex; attribute float aLift; uniform mat4 uMVP; uniform float uRad, uEst; varying vec2 vTex; varying vec3 vPos;
+  // aLift = the height GUESSED from the photo's brightness (mm, toward the eye's centre); uEst = 0 switches it off
+  void main() { vTex = aTex; vPos = aPos * (uRad - aLift * uEst); gl_Position = uMVP * vec4(vPos, 1.0); }`, PRECISION + ON_SCAN + `
+  uniform sampler2D uPhoto, uHeat; uniform bool uHeatOn; uniform float uHeatThr, uOpacity, uDim; varying vec2 vTex; varying vec3 vPos;
   void main() {
     if (length(vTex - 0.5) > 0.485) discard;                   // outside the round picture
     if (inPatch(vPos)) discard;                                // the measured patch is drawn there instead
@@ -323,7 +346,7 @@ const wall = program(`
       vec3 hot = t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8) : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2);
       col = mix(col, hot, uOpacity * (0.45 + 0.55 * t));
     }
-    gl_FragColor = vec4(col * 0.9, 1.0);
+    gl_FragColor = vec4(col * uDim, 1.0);
   }`);
 // Every drawn (not measured) part of the eye: one colour per part, lit from above and from the viewer.
 //   uClip 1 = the top-front quarter is cut away (y > 0 and z > uCutZ); 2 = a cut face on the plane y = 0, kept only in front of uCutZ.
@@ -507,8 +530,10 @@ function makeTexture(image) {
 
 // ---------------------------------------------------------------- state and controls
 const state = { yaw: 0.6, pitch: 0.5, dist: 13, target: [0, 0, 0], dirty: true, sel: 0, probe: null };
-const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn", "texMode", "redMode", "heatThr", "shape", "nerve", "cutOpen", "labelsOn"]) ui[id] = $(id);
-const curved = () => ui.shape.value === "1";
+const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn", "texMode", "redMode", "heatThr", "shape", "nerve", "cutOpen", "labelsOn", "shade", "estRelief"]) ui[id] = $(id);
+const curved = () => ui.shape.value !== "0";      // on the ball: scan only, or the textbook eye
+const textbook = () => ui.shape.value === "1";    // the drawn eye around the scan
+const scanOnly = () => ui.shape.value === "2";    // nothing drawn that is not data
 const F = D.fusion || null;                     // the photo (and heat) lined up with this scan, if oct3d.py was given one
 const SPOTS = F ? F.hot_spots : [];
 let photoTex = null, heatTex = null, heatPix = null;
@@ -538,13 +563,22 @@ function syncOutputs() {
   $("hudRelief").textContent = "Relief " + fmt(ui.stretch.value, 1) + "x" + (stretch() === 1 ? " (true proportions)" : " (thickness drawn " + fmt(ui.stretch.value, 1) + " times too tall)");
   ui.slice.nextElementSibling.textContent = (D.slices[Number(ui.slice.value)].scan + 1) + " / " + D.scans;
   ui.heatThr.nextElementSibling.textContent = fmt(ui.heatThr.value * 100) + "%";
-  document.querySelectorAll(".eyeRow").forEach(e => e.style.display = curved() ? "" : "none");
+  document.querySelectorAll(".eyeRow").forEach(e => e.style.display = textbook() ? "" : "none");
+  document.querySelectorAll(".scanRow").forEach(e => e.style.display = scanOnly() && wallMesh ? "" : "none");
   document.querySelectorAll(".flatRow").forEach(e => e.style.display = curved() ? "none" : "");
   $("hint").textContent = "Drag to turn · wheel or pinch to zoom · click the " + (curved() ? "scanned patch" : "surface") + " to measure a spot";
   const lb = $("labelButton"); if (lb) lb.textContent = ui.labelsOn.checked ? "Hide names" : "Show names";
-  $("legendText").textContent = heatOn() ? "model evidence (from the photo): weak → strong" : `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm`;
+  $("legendText").textContent = heatOn() ? "model evidence (from the photo): weak → strong" : ui.redMode.value === "0" ? `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm` : "no tint: the data's own colours";
+  $("legend").querySelector("i").style.display = ui.redMode.value === "-1" ? "none" : "";
+  if (scanOnly()) $("hudRelief").textContent += " · grid: 1 mm squares along the wall" + (ui.estRelief.checked && wallMesh ? " · photo relief is GUESSED, not measured" : "");
 }
-for (const id in ui) ui[id].addEventListener("input", () => { if (id === "shape") { buildViews(); setView(curved() ? "eye" : "three"); } if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); drawBscan(); redraw(); });
+for (const id in ui) ui[id].addEventListener("input", () => { if (id === "shape") { shapeDefaults(); buildViews(); setView(scanOnly() ? "scan" : textbook() ? "eye" : "three"); } if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); drawBscan(); redraw(); });
+// What each shape starts with: scan only = no tint, no lighting, no pins (only data); the others = as before.
+function shapeDefaults() {
+  const plain = scanOnly();
+  ui.redMode.value = plain ? "-1" : heatTex ? "1" : "0"; ui.shade.checked = !plain; ui.pinsOn.checked = !plain;
+  $("pins").style.display = ui.pinsOn.checked ? "" : "none";
+}
 for (const [id, value] of [["relief1", 1], ["relief5", 5]]) $(id).onclick = () => { ui.stretch.value = value; syncOutputs(); redraw(); };
 
 // ---------------------------------------------------------------- side panel
@@ -633,8 +667,9 @@ const VIEWS = { three: { target: [0, 0, 0], dist: far, yaw: 0.6, pitch: 0.5 }, t
                 front: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 0.12 },
                 // eyeball shape: the cut-open eye from the front and above; the patch from just inside; the front; the cut face from above
                 eye: { target: [0, 0, 0.5], dist: 60, yaw: 0.72, pitch: 0.5 }, patch: { target: [0, 0, -R + 0.5], dist: 8, yaw: 0.3, pitch: -0.75 },
+                scan: { target: [0, 0, -R + 1.5], dist: 25, yaw: 0.5, pitch: 0.3 }, scanEdge: { target: [0, 0, -R + 1.5], dist: 25, yaw: 1.3, pitch: 0.12 },
                 frontEye: { target: [0, 0, 2], dist: 60, yaw: 0, pitch: 0.24 }, section: { target: [0, 0, 0.5], dist: 60, yaw: -1.5708, pitch: 1.5 } };
-const VIEW_NAMES = { three: "3/4 view", top: "From above", front: "From the front", eye: "Full cutaway", patch: "Zoom to OCT patch", frontEye: "Front view", section: "Section from above" };
+const VIEW_NAMES = { three: "3/4 view", top: "From above", front: "From the front", scan: "Whole scan", scanEdge: "From the side", eye: "Full cutaway", patch: "Zoom to OCT patch", frontEye: "Front view", section: "Section from above" };
 let flight = null, viewNow = "eye";
 function setView(name, glide) {
   viewNow = name; const goal = JSON.parse(JSON.stringify(VIEWS[name]));
@@ -644,12 +679,12 @@ function setView(name, glide) {
 }
 function buildViews() {         // the buttons over the picture, for the shape now shown
   const box = $("views"); box.innerHTML = "";
-  for (const name of curved() ? ["eye", "patch", "frontEye", "section"] : ["three", "top", "front"]) {
+  for (const name of scanOnly() ? ["scan", "patch", "scanEdge"] : textbook() ? ["eye", "patch", "frontEye", "section"] : ["three", "top", "front"]) {
     const b = document.createElement("button"); b.dataset.view = name; b.textContent = VIEW_NAMES[name];
     b.onclick = () => setView(name, curved());                   // in the eyeball, glide between the whole eye and the patch
     box.appendChild(b);
   }
-  if (curved()) {               // one more button: part names on / off
+  if (textbook()) {             // one more button: part names on / off
     const b = document.createElement("button"); b.id = "labelButton"; b.onclick = () => { ui.labelsOn.checked = !ui.labelsOn.checked; syncOutputs(); redraw(); };
     box.appendChild(b); syncOutputs();
   }
@@ -674,7 +709,7 @@ function pick(clientX, clientY) {
   if (curved()) {               // eyeball: turn each point of the ray back into a position on the wall, then compare radii
     for (let t = 0.1; t < state.dist + 2 * R + 5; t += 0.01) {
       const p = add(cam.eye, mul(dir, t)), r = Math.hypot(p[0], p[1], p[2]);
-      if (r > R_SCLERA && r < R_OUT && !(ui.cutOpen.checked && p[1] > 0 && p[2] > CUT_Z)) return null;   // the ray meets the eye's wall first
+      if (textbook() && r > R_SCLERA && r < R_OUT && !(ui.cutOpen.checked && p[1] > 0 && p[2] > CUT_Z)) return null;   // the ray meets the eye's wall first
       if (r < R - 4 || r > R + 0.5 || p[2] > 0) continue;
       const side = Math.hypot(p[0], p[1]), along = Math.acos(Math.max(-1, Math.min(1, -p[2] / r))) * R, k = side > 1e-9 ? along / side : 0;
       const u = p[0] * k / W + 0.5, v = -p[1] * k / L + 0.5;
@@ -743,12 +778,59 @@ function patchWalls(s, cutV) {
     tri.push(...q[0][0], ...q[0][1], ...q[1][0],  ...q[1][0], ...q[0][1], ...q[1][1]); } };
   const drawn = () => MED * s, measured = (u, v) => at(THICK, u, v) / 1000 * s;
   side(0, 0, 1, 0, drawn); side(1, 0, 1, 1, drawn); side(1, 1, 0, 1, drawn); side(0, 1, 0, 0, drawn);
-  side(0, 0, 1, 0, measured); side(0, 0, 0, vMax, measured); side(1, 0, 1, vMax, measured); if (cutV >= 1) side(0, 1, 1, 1, measured);
   gl.bindBuffer(gl.ARRAY_BUFFER, bufSkirt); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tri), gl.DYNAMIC_DRAW);
   return { pos: bufSkirt, n: tri.length / 3 };
 }
 
-// ---------------------------------------------------------------- part names with leader lines (eyeball shape)
+// The patch's own cut edges (on the ball): each shows the OCT's real cross-section there. The first and last edge are
+// B-scans; the left and right edges are built from the first / last column of every embedded B-scan (edgeTex).
+let edgeTex = null;
+function drawPatchEdges(s, cutV, cam) {
+  if (!edgeTex) return;
+  const vMax = Math.min(1, cutV), first = D.slices[0].scan, last = D.slices[D.slices.length - 1].scan, n = D.slices.length;
+  const acrossScans = v => ((Math.min(Math.max(v * D.scans - 0.5, first), last) - first) / Math.max(1, last - first) * (n - 1) + 0.5) / n;
+  const sides = [[0, 0, 1, 0, sliceTex[0], u => u], [0, 0, 0, vMax, edgeTex[0], (u, v) => acrossScans(v)], [1, 0, 1, vMax, edgeTex[1], (u, v) => acrossScans(v)]];
+  if (cutV >= 1) sides.push([0, 1, 1, 1, sliceTex[n - 1], u => u]);
+  begin(slab);
+  const aPos = gl.getAttribLocation(slab, "aPos"), aTex = gl.getAttribLocation(slab, "aTex"), N = 96;
+  gl.uniformMatrix4fv(gl.getUniformLocation(slab, "uMVP"), false, cam.mvp); gl.uniform1i(gl.getUniformLocation(slab, "uScan"), 0); gl.activeTexture(gl.TEXTURE0);
+  for (const [u0, v0, u1, v1, tex, along] of sides) {
+    const strip = [];
+    for (let i = 0; i <= N; i++) {
+      const u = u0 + (u1 - u0) * i / N, v = v0 + (v1 - v0) * i / N, x = along(u, v);
+      const dTop = Math.max(0, at(ILM, u, v) / 1000 - 0.04), low = at(LOW, u, v) / 1000, dBottom = Math.min(DEPTH, low + (R_CHOROID - R) / s);
+      strip.push(...onWall(u, v, (low - dTop) * s), x, dTop / DEPTH,  ...onWall(u, v, R - R_CHOROID), x, dBottom / DEPTH);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufSlab); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(strip), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 20, 12);
+    gl.bindTexture(gl.TEXTURE_2D, tex); gl.drawArrays(gl.TRIANGLE_STRIP, 0, strip.length / 5);
+  }
+}
+// Scan only: the photo's rim, given the thickness the photo is drawn at. Plain grey: nothing was measured there.
+let rimMesh = null;
+function photoRim(s) {
+  if (rimMesh && rimMesh.s === s) return rimMesh;
+  if (rimMesh) gl.deleteBuffer(rimMesh.pos);
+  const m = F.registration.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0], a = [], b = [];
+  for (let i = 0; i <= 180; i++) {
+    const t = i / 180 * 2 * Math.PI, dx = 0.5 + 0.485 * Math.cos(t) - m[0][2], dy = 0.5 + 0.485 * Math.sin(t) - m[1][2];
+    const u = (m[1][1] * dx - m[0][1] * dy) / det, v = (-m[1][0] * dx + m[0][0] * dy) / det;
+    a.push(onWall(u, v, MED * s + 0.03)); b.push(onWall(u, v, 0));
+  }
+  rimMesh = band(a, b); rimMesh.s = s; return rimMesh;
+}
+// Scan only: a faint grid on the wall, one line per millimetre measured along the wall, out to 8 mm from the centre.
+const gridLines = [];
+for (let k = -8; k <= 8; k++) for (const swap of [false, true]) {
+  const reach = Math.sqrt(8.5 * 8.5 - k * k);
+  for (let i = 0; i < 40; i++) for (const t of [i / 40, (i + 1) / 40]) {
+    const along = -reach + 2 * reach * t, lx = swap ? along : k, ly = swap ? k : along;
+    gridLines.push(...onWall(lx / W + 0.5, ly / L + 0.5, -0.13));
+  }
+}
+
+// ---------------------------------------------------------------- part names with leader lines (textbook eye)
 // Each name knows the 3-D point it belongs to. `inside` = only visible when the eye is cut open.
 const ringPoint = (r, t) => { const q = Math.sqrt(r * r - CUT_Z * CUT_Z); return [q * Math.cos(t), q * Math.sin(t), CUT_Z]; };
 const wallAt = (r, a, side) => [side * r * Math.sin(a), 0, r * Math.cos(a)];        // a point on the cut face y = 0
@@ -773,6 +855,7 @@ PARTS.forEach(q => { if (!q.closed) q.closed = q.at; });
 // Can the camera see this point, or is the eye's wall in the way? Walk from the point toward the camera
 // and stop if a step lands inside the wall (which is missing in the cut-away quarter, and in front where the clear cornea is).
 function hiddenByWall(cam, p, s) {
+  if (!textbook()) return false;                               // no drawn wall in the other shapes
   const dir = norm(sub(cam.eye, p)), reach = Math.hypot(...sub(cam.eye, p)), open = ui.cutOpen.checked;
   for (let t = 0.45; t < Math.min(reach, 40); t += 0.2) {
     const q = add(p, mul(dir, t)), r = Math.hypot(q[0], q[1], q[2]);
@@ -793,7 +876,7 @@ function layoutLabels(cam) {
   const shown = [];
   for (const p of PARTS) {
     p.el.style.display = "none";
-    if (!curved() || !ui.labelsOn.checked) continue;
+    if (!textbook() || !ui.labelsOn.checked) continue;
     if (insideEye ? !p.always : p.nerve && ui.nerve.value === "0") continue;
     for (const point of (open ? p.at : p.closed)(s)) {         // the first candidate point that is in the picture and not behind the wall
       const xy = toScreen(cam, point); if (!xy || hiddenByWall(cam, point, s)) continue;
@@ -831,7 +914,9 @@ function drawSurface(m, lower, cam) {
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, enFaceTex); gl.uniform1i(U("uEnFace"), 0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, photoTex || enFaceTex); gl.uniform1i(U("uPhoto"), 1);
   gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, heatTex || enFaceTex); gl.uniform1i(U("uHeat"), 2);
-  gl.uniform1i(U("uTexMode"), photoTex && ui.texMode.value === "1" ? 1 : 0); gl.uniform1i(U("uRedMode"), heatOn() ? 1 : 0);
+  gl.uniform1i(U("uTexMode"), ui.texMode.value === "2" ? 2 : photoTex && ui.texMode.value === "1" ? 1 : 0);
+  gl.uniform1i(U("uRedMode"), heatOn() ? 1 : ui.redMode.value === "0" ? 0 : 2);      // 2 = no tint at all
+  gl.uniform1i(U("uShade"), ui.shade.checked ? 1 : 0); gl.uniform1i(U("uScanOnly"), scanOnly() ? 1 : 0); gl.uniform1f(U("uMin"), tMin);
   gl.uniform1f(U("uHeatThr"), Number(ui.heatThr.value));
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIndex); gl.drawElements(gl.TRIANGLES, index.length, gl.UNSIGNED_SHORT, 0);
 }
@@ -851,14 +936,17 @@ function frame(now) {
   state.dirty = false;
   const cam = camera(), s = stretch(), top = D0 * s, bottom = (D0 - DEPTH) * s;
   const open = ui.cutOpen.checked, clip = open ? 1 : 0, sliceCut = ui.cut.checked && ui.showSlice.checked ? sliceV() + 0.25 / D.scans : 2;
-  if (curved() && (!retina || retina.s !== s)) buildRetina(s);
+  if (textbook() && (!retina || retina.s !== s)) buildRetina(s);
+  const photoShown = curved() && wallMesh && !(scanOnly() && ui.texMode.value !== "1");   // the grey OCT modes show only what the OCT saw
   gl.viewport(0, 0, w, h); gl.clearColor(0.055, 0.067, 0.086, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
-  if (curved() && wallMesh) {   // the whole photo on the back wall, just behind the patch
+  if (photoShown) {             // the whole photo on the back wall, around the patch
     begin(wall);
     const UW = n => gl.getUniformLocation(wall, n), aPos = gl.getAttribLocation(wall, "aPos"), aTex = gl.getAttribLocation(wall, "aTex");
     gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.pos); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.tex); gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 0, 0);
+    const aLift = gl.getAttribLocation(wall, "aLift"); gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.lift); gl.enableVertexAttribArray(aLift); gl.vertexAttribPointer(aLift, 1, gl.FLOAT, false, 0, 0);
+    gl.uniform1f(UW("uEst"), scanOnly() && ui.estRelief.checked ? s : 0); gl.uniform1f(UW("uDim"), scanOnly() ? 1 : 0.9);
     gl.uniformMatrix4fv(UW("uMVP"), false, cam.mvp); gl.uniform1i(UW("uHeatOn"), heatOn() && wallMesh.heat ? 1 : 0);
     gl.uniform1f(UW("uRad"), R - MED * s - 0.03); gl.uniform1f(UW("uR"), R); gl.uniform2f(UW("uHalf"), W / 2, L / 2);   // just inside the drawn retina's surface
     gl.uniform1f(UW("uHeatThr"), Number(ui.heatThr.value)); gl.uniform1f(UW("uOpacity"), Number(ui.opacity.value));
@@ -868,8 +956,12 @@ function frame(now) {
   }
   drawSurface(mesh.ilm, false, cam);
   if (ui.showLow.checked || curved()) drawSurface(mesh.low, true, cam);
-  if (curved()) {               // the drawn eye: every opaque part (see-through ones come last)
-    drawSolid(patchWalls(s, sliceCut), [0.80, 0.55, 0.38, 1], { style: 3, triangles: true }, cam);
+  if (curved()) {               // the patch's cut edges (real OCT) and the cut edge of what surrounds it
+    drawPatchEdges(s, sliceCut, cam);
+    drawSolid(patchWalls(s, sliceCut), scanOnly() ? [0.20, 0.21, 0.24, 1] : [0.80, 0.55, 0.38, 1], { style: 3, triangles: true }, cam);
+    if (scanOnly() && photoShown) drawSolid(photoRim(s), [0.30, 0.31, 0.34, 1], { style: 3 }, cam);
+  }
+  if (textbook()) {             // the drawn eye: every opaque part (see-through ones come last)
     drawSolid(retina.inner, COLOR.retina, { clip, hole: true }, cam);
     drawSolid(anatomy.sclera, COLOR.sclera, { clip }, cam);
     drawSolid(anatomy.ciliary, COLOR.ciliary, { clip }, cam);
@@ -914,7 +1006,8 @@ function frame(now) {
     for (let c = 0; c < 4; c++) for (let i = 0; i < K; i++) for (const t of [i / K, (i + 1) / K]) {
       const a = corner[c], b = corner[(c + 1) % 4]; edge.push(...onWall(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.02));
     }
-    drawLines(edge, [0.42, 0.77, 1, 0.9], cam);
+    drawLines(edge, [0.42, 0.77, 1, scanOnly() ? 0.45 : 0.9], cam);
+    if (scanOnly()) drawLines(gridLines, [0.75, 0.82, 0.95, 0.13], cam);
   }
   if (ui.showSlice.checked && !curved()) drawLines([-X, top, z, X, top, z,  X, top, z, X, bottom, z,  X, bottom, z, -X, bottom, z,  -X, bottom, z, -X, top, z], [0.42, 0.77, 1, 0.9], cam);
   const tips = [], stalks = [];
@@ -924,7 +1017,7 @@ function frame(now) {
   }
   if (state.probe) drawLines([...surfacePoint(state.probe.u, state.probe.v, 0), ...surfacePoint(state.probe.u, state.probe.v, 0.08 * Math.max(W, L))], [1, 1, 1, 1], cam);
   if (ui.pinsOn.checked) drawLines(stalks, [1, 0.35, 0.28, 0.9], cam);
-  if (curved()) {               // fine threads and the see-through parts, drawn last (they must not hide what lies behind)
+  if (textbook()) {             // fine threads and the see-through parts, drawn last (they must not hide what lies behind)
     const threads = []; for (const [t, seg] of zonules) if (!open || Math.sin(t) <= 0) threads.push(...seg);
     drawLines(threads, [0.93, 0.93, 0.86, 0.55], cam);
     gl.depthMask(false);
@@ -959,7 +1052,8 @@ function frame(now) {
     }
   }
   if (F && F.photo_full) {       // the whole photo, each of its points placed on the wall through the alignment
-    const m = F.registration.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0], G = 120, pos = [], tex = [], idx = [];
+    const m = F.registration.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0], G = 255, pos = [], tex = [], idx = [];
+    const fullImage = await loadImage(F.photo_full);
     for (let j = 0; j <= G; j++) for (let i = 0; i <= G; i++) {
       const x = i / G, y = j / G, dx = x - m[0][2], dy = y - m[1][2];
       // the alignment maps scan (u, v) -> photo (x, y); here it is turned around: photo -> scan
@@ -967,14 +1061,40 @@ function frame(now) {
       pos.push(...mul(onWall(u, v, 0), 1 / R)); tex.push(x, y);         // only the direction; the shader sets the distance
     }
     for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) { const a = j * (G + 1) + i, b = a + 1, c = a + G + 1, d = c + 1; idx.push(a, c, b, b, c, d); }
+    // The GUESSED relief (switch "Guess relief from photo"; never used for any number). One value per grid corner, in mm:
+    // darker than its surroundings (a vessel) = raised a little; the brightest area (the optic disc) = lowered.
+    const n = G + 1, cv = document.createElement("canvas"); cv.width = cv.height = n;
+    const cx = cv.getContext("2d"); cx.drawImage(fullImage, 0, 0, n, n);
+    const px = cx.getImageData(0, 0, n, n).data, green = new Float32Array(n * n), lum = new Float32Array(n * n);
+    for (let i = 0; i < n * n; i++) { green[i] = px[i * 4 + 1] / 255; lum[i] = (px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2]) / 765; }
+    const blur = (src, rad) => {    // average over a square of side 2 * rad + 1, done as two passes of running sums
+      let a = src, b = new Float32Array(n * n);
+      for (const [dx, dy] of [[1, 0], [0, 1]]) {
+        for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { let sum = 0, cnt = 0;
+          for (let k = -rad; k <= rad; k++) { const xx = x + k * dx, yy = y + k * dy; if (xx >= 0 && xx < n && yy >= 0 && yy < n) { sum += a[yy * n + xx]; cnt++; } }
+          b[y * n + x] = sum / cnt; }
+        a = b; b = new Float32Array(n * n);
+      }
+      return a;
+    };
+    const around = blur(green, 5), soft = blur(lum, 4), brightest = soft.reduce((a, b) => Math.max(a, b), 1e-6), lift = new Float32Array(n * n);
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const i = y * n + x; if (Math.hypot(x / G - 0.5, y / G - 0.5) > 0.47) continue;
+      lift[i] = 0.05 * Math.min(1, Math.max(0, (around[i] - green[i] - 0.02) / 0.10)) - 0.25 * Math.min(1, Math.max(0, (soft[i] - 0.8 * brightest) / (0.2 * brightest)));
+    }
     wallMesh = { pos: buf(gl.ARRAY_BUFFER, new Float32Array(pos)), tex: buf(gl.ARRAY_BUFFER, new Float32Array(tex)), idx: buf(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx)), count: idx.length,
-                 photo: makeTexture(await loadImage(F.photo_full)), heat: F.heat_full ? makeTexture(await loadImage(F.heat_full)) : null };
+                 lift: buf(gl.ARRAY_BUFFER, lift), photo: makeTexture(fullImage), heat: F.heat_full ? makeTexture(await loadImage(F.heat_full)) : null };
   }
-  document.querySelectorAll(".fusionRow").forEach(e => e.style.display = photoTex ? "" : "none");
+  // choices that need a photo or a heat map are removed when there is none
+  if (!photoTex) { ui.texMode.querySelector('option[value="1"]').remove(); ui.texMode.value = "0"; }
+  if (!heatTex) ui.redMode.querySelector('option[value="1"]').remove();
   document.querySelectorAll(".heatRow").forEach(e => e.style.display = heatTex ? "" : "none");
   const images = await Promise.all(D.slices.map(s => loadImage(s.img)));
   images.forEach((im, i) => { sliceImg[i] = im; sliceTex[i] = makeTexture(im); });
-  buildViews(); setView("eye"); renderSide(); syncOutputs(); drawBscan(); requestAnimationFrame(frame);
+  // The patch's left and right cut edges: one column of every B-scan, side by side (left edge = first column, right = last).
+  edgeTex = [0, 1].map(side => { const c = document.createElement("canvas"); c.width = images.length; c.height = images[0].height; const ctx = c.getContext("2d");
+    images.forEach((im, i) => ctx.drawImage(im, side ? im.width - 1 : 0, 0, 1, im.height, i, 0, 1, im.height)); return makeTexture(c); });
+  shapeDefaults(); buildViews(); setView("scan"); renderSide(); syncOutputs(); drawBscan(); requestAnimationFrame(frame);
   window.addEventListener("resize", redraw);
 })();
 </script>

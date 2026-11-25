@@ -25,7 +25,12 @@ What this script does with a volume, all hand-written, nothing learned:
      macular edema) are listed as numbered findings with size and volume.
   4. WRITE ONE WEB PAGE (<out>/viewer.html, no internet needed) with the real
      surface as a 3D shape you can turn, shaded red where the retina is thick,
-     a B-scan you can slide through the volume, and click-to-measure. Two shapes:
+     a B-scan you can slide through the volume, and click-to-measure. Three shapes:
+     "Scan only" (the default: nothing drawn; the photo's own colours and the OCT
+     on a curved shell of radius 11 mm, height from the measured thickness inside
+     the scanned square only, the OCT's real cross-sections on the square's cut
+     edges, a 1 mm grid; the curve is an ASSUMPTION, and relief guessed from the
+     photo's brightness is a separate switch, off by default, labelled estimated),
      the scan curved onto the back wall of a textbook-style cut-open standard eye
      (wall coats, cornea, iris, lens, ciliary body, muscles and optic nerve are a
      DRAWING with named parts, the same for every scan; the thickness on it is

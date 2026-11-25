@@ -174,7 +174,16 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   with the retina thickness under each); refuses an untrusted match unless `--force-fusion`. The heat is computed on
   the flat photo (`eye3d.py` now writes `<run>/eye3d/heat/<name>.png`); photo and heat must be the same preprocessed
   frame. `oct3d.py --demo` shows the fused cartoon pair (its heat is DRAWN, not from a model).
-  Page shapes (switch under Display): "Eyeball" (default) = a textbook-style cutaway of a STANDARD 24 mm eye, all
+  Page shapes (switch under Display), three: "Scan only" (default since the scan-only rebuild) = NOTHING drawn: the
+  whole photo in its own pixel colours (no tint, no lighting unless "Light the relief" is ticked) on a curved shell of
+  radius 11 mm (the retina inside a 24 mm eye: 24 mm is the diameter), the OCT square raised by the MEASURED thickness
+  x the relief slider, the OCT's own B-scan pixels on the square's four cut edges (first/last B-scan and the first/last
+  column of every B-scan), a grey rim for the photo's edge and a 1 mm grid. "Surface shows": true photo colours / OCT
+  seen from above (grey) / OCT depth in grey (thick = bright). Still ASSUMED: the curve itself, where the square sits
+  on it, and all height OUTSIDE the square (the photo has no depth: it lies at the scan's median thickness). "Guess
+  relief from photo" (off by default, tagged "estimated") raises dark vessels (<= 0.05 mm) and lowers the bright disc
+  (<= 0.25 mm) from photo BRIGHTNESS: a guess for looking, never a measurement; a real disc cup or foveal pit shows
+  only where an OCT scan covers it. "Textbook eye" (kept as an option) = a textbook-style cutaway of a STANDARD 24 mm eye, all
   hand-written WebGL (no three.js): the top-front quarter is cut away (y > 0 and z > -1.5 mm; "Cut the eye open"), the
   cut faces show sclera (white), choroid (dark red), retina (peach); cornea, anterior chamber, iris with pupil, pleated
   ciliary body, zonular fibres, lens, four rectus muscle stubs, optic nerve with central artery and vein. ALL of that is
