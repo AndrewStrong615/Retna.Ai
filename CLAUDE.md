@@ -160,9 +160,22 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   through the volume, click to measure; plus `layers.npz`, `summary.json`. `--demo` = built-in synthetic volume (known
   answer: surfaces within ~3 um). Pixel size comes from the .vol, else from `--width-mm/--length-mm/--depth-mm`
   (marked "assumed"). A .vol's own device surfaces are compared with ours (free check). The disease model reads
-  fundus photos only: NO model heat on OCT until there is photo-OCT registration or an OCT model trained from
-  scratch. Planned real data: OLIVES (Prabhushankar et al. 2022, Zenodo 7105232: DR/DME eyes, OCT volumes + near-IR
+  fundus photos only: model heat reaches this page only through a registered photo (`--photo/--heat`, see
+  register.py); an OCT model trained from scratch does not exist yet. Planned real data: OLIVES (Prabhushankar et al. 2022, Zenodo 7105232: DR/DME eyes, OCT volumes + near-IR
   fundus; check its licence before use; kept in `retina-data\olives`, never in the repo). Never commit scans or pages.
+- `register.py` (photo + OCT fusion; checked on a synthetic pair only): lines a fundus photo up with an OCT volume by
+  the vessels: photo vessel map (darker than surroundings, green channel) vs the OCT's vessel SHADOWS (mean of the
+  bright band below the lower surface, seen from above); search over size (0.6-1.6x of `--photo-width-mm` 13) and
+  turn (+-16 degrees, then fine), every shift at once by hand-written FFT normalized cross-correlation. Similarity
+  transform only (no mirror, no bending). Built-in control: the same search with the scan's map upside down and
+  transposed gives the chance level; TRUSTED only if fit >= 1.4x control and >= 0.25. Synthetic pair: under 1 px off,
+  a photo with another vessel tree rejected. `oct3d.py --photo P [--heat H]` then lays the photo and the model's heat
+  onto the measured surface (page: "Surface shows" / "Red shows", alignment check picture, model hot spots A, B..
+  with the retina thickness under each); refuses an untrusted match unless `--force-fusion`. The heat is computed on
+  the flat photo (`eye3d.py` now writes `<run>/eye3d/heat/<name>.png`); photo and heat must be the same preprocessed
+  frame. `oct3d.py --demo` shows the fused cartoon pair (its heat is DRAWN, not from a model). Real data caveat:
+  OLIVES pairs OCT with NEAR-INFRARED fundus pictures (as recalled; verify on download), not the colour photos the
+  model was trained on: fine for testing registration, out of domain for the model's heat.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are

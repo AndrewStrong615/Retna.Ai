@@ -646,9 +646,11 @@ def test_end_to_end(tmp):
         page = open(os.path.join(view, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
         table = json.load(open(os.path.join(view, "findings.json"))) if code == 0 else {"eyes": []}
         val_names = set(pd.read_csv(os.path.join(out, "val_predictions.csv"))["image"].astype(str))
-        check("eye3d.py writes the 3D page (photos embedded, marker filled) for validation eyes only",
+        check("eye3d.py writes the 3D page (photos embedded, marker filled) and heat pictures, for validation eyes only",
               code == 0 and "/*EYE_DATA*/" not in page and page.count("data:image/jpeg;base64,") == len(table["eyes"]) > 0
-              and all(e["name"] in val_names for e in table["eyes"]))
+              and all(e["name"] in val_names for e in table["eyes"])
+              and all(Image.open(os.path.join(view, "heat", e["name"] + ".png")).size == (e["size"], e["size"])
+                      for e in table["eyes"]))
         code, log = run(["eye3d.py", "--run", out, "--images", tight, "--image",
                          str(pd.read_csv(os.path.join(out, "test_split.csv"))["image"].iloc[0])])
         check("eye3d.py refuses test images", code != 0 and "TEST images" in log)
@@ -764,6 +766,62 @@ def test_oct3d(tmp):
           code == 0 and "/*OCT_DATA*/" not in page and '"ilm_um"' in page
           and os.path.exists(os.path.join(out, "layers.npz"))
           and len(json.load(open(os.path.join(out, "summary.json")))["findings"]) == 1 and again != 0)
+
+    # Photo + scan: register.py against a pair whose true alignment is known.
+    import register as reg
+    from oct3d import synthetic_pair
+    image = rng.random((40, 50)).astype(np.float32)
+    template = rng.random((9, 12)).astype(np.float32)
+    scores = reg.ncc_map(image, np.fft.rfft2(image), template)
+    direct = [np.corrcoef(image[y:y + 9, x:x + 12].ravel(), template.ravel())[0, 1] for y, x in ((0, 0), (7, 21), (31, 38))]
+    check("register: FFT cross-correlation = the correlation computed window by window",
+          scores.shape == (32, 39) and np.allclose([scores[0, 0], scores[7, 21], scores[31, 38]], direct, atol=1e-4))
+    vol, spacing, _, _, photo, heat, true_matrix = synthetic_pair()
+    ilm, low = find_layers(vol, spacing)
+    oct_map = reg.oct_vessel_map(reg.oct_shadow_picture(vol, low, spacing))
+    found = reg.register(photo, oct_map, 6.0)
+    corners = [(0, 0), (1, 0), (1, 1), (0, 1), (0.5, 0.5)]
+    off = max(np.hypot(*(np.array(reg.scan_to_photo(found["matrix"], u, v)) - np.array(reg.scan_to_photo(true_matrix, u, v))))
+              for u, v in corners) * photo.shape[0]
+    check("register: the scan is placed in the photo within 2 pixels of the truth (size, 6 degree turn, shift) and trusted",
+          off < 2 and found["trusted"], f"largest error {off:.2f} px of {photo.shape[0]}, fit {found['ncc']:.2f}, "
+                                        f"control {found['control']:.2f}")
+    other = reg.register(synthetic_pair(tree_photo=1)[4], oct_map, 6.0)
+    check("register: a photo with another vessel pattern is NOT trusted",
+          not other["trusted"], f"fit {other['ncc']:.2f}, control {other['control']:.2f}")
+    # Carried-over heat lands on the swollen area (1.5 mm right, 1 mm toward the first scan = u 0.75, v 0.333).
+    on_scan = reg.warp_to_scan(heat, found["matrix"], 256)
+    py, px = np.unravel_index(on_scan.argmax(), on_scan.shape)
+    same = reg.warp_to_scan(heat, [[1, 0, 0], [0, 1, 0]], heat.shape[0])
+    check("register: warping with 'no change' returns the picture; the heat blob lands where it was drawn on the scan",
+          np.allclose(same, heat, atol=1) and abs(px / 256 - 0.75) < 0.02 and abs(py / 256 - 0.3333) < 0.02)
+    fused = json.load(open(os.path.join(out, "summary.json"))).get("fusion", {})
+    spot = (fused.get("hot_spots") or [{}])[0]
+    check("oct3d.py --demo fuses: photo lined up and trusted, model hot spot A sits on the thickened retina",
+          fused.get("registration", {}).get("trusted") is True and '"photo_on_scan"' in page
+          and spot.get("thickness_um", 0) > 400 and abs(spot.get("x_mm", 0) - 1.5) < 0.15)
+    # A real-style call with files: scan folder + photo of ANOTHER eye must be refused; --heat needs --photo.
+    scan_dir = os.path.join(tmp, "oct_pair")
+    os.makedirs(scan_dir)
+    for i in range(len(vol)):
+        Image.fromarray(vol[i]).save(os.path.join(scan_dir, f"{i:03d}.png"))
+    wrong = os.path.join(tmp, "wrong_photo.png")
+    Image.fromarray(synthetic_pair(tree_photo=1)[4]).save(wrong)
+    right = os.path.join(tmp, "right_photo.png")
+    Image.fromarray(photo).save(right)
+    heat_png = os.path.join(tmp, "heat.png")
+    Image.fromarray(heat).save(heat_png)
+    base = ["oct3d.py", "--scan", scan_dir, "--depth-mm", "2.0"]
+    code_wrong, log_wrong = run(base + ["--out", os.path.join(tmp, "fuse_wrong"), "--photo", wrong])
+    code_heat, log_heat = run(base + ["--out", os.path.join(tmp, "fuse_heat"), "--heat", heat_png])
+    code_ok, log_ok = run(base + ["--out", os.path.join(tmp, "fuse_ok"), "--photo", right, "--heat", heat_png])
+    if code_ok != 0:
+        print(log_ok[-2000:])
+    check("oct3d.py --photo/--heat from files: the right photo fuses, another eye's photo is refused, heat alone refused",
+          code_ok == 0 and "TRUSTED" in log_ok and "model hot spot A" in log_ok
+          and code_wrong != 0 and "do not clearly match" in log_wrong
+          and not os.path.exists(os.path.join(tmp, "fuse_wrong", "viewer.html"))
+          and code_heat != 0 and "--heat needs --photo" in log_heat)
 
 
 def test_vit():

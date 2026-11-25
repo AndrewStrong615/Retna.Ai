@@ -43,7 +43,8 @@ Usage:
   python eye3d.py --run runs\\exp15 --images ... --per-group 6
   python eye3d.py --run runs\\exp15 --images ... --image 12345_left 9464_right
 Then open <run>\\eye3d\\viewer.html. findings.json next to it holds the same
-numbers as a table. The page embeds the chosen photos, so, like the photos
+numbers as a table, and heat\\<name>.png the heat maps as gray pictures (for
+oct3d.py --heat). The page embeds the chosen photos, so, like the photos
 themselves, never commit it to git.
 """
 
@@ -317,6 +318,7 @@ def build_eye(cam, eval_tf, image_path, size, device, hot, max_findings):
         "findings": findings,
         "photo": to_data_url(rgb, "JPEG"),
         "heat": to_data_url((heat * 255).round().astype(np.uint8), "PNG", small),
+        "heat_full": to_data_url((heat * 255).round().astype(np.uint8), "PNG"),      # full size, saved as a file by main()
         "coarse": to_data_url((coarse * 255).round().astype(np.uint8), "PNG", small),
         "vessels": to_data_url(vessels.astype(np.uint8) * 255, "PNG"),
         "labels": to_data_url(numbered, "PNG", small, smooth=False),
@@ -408,6 +410,14 @@ def main():
     meta = {"run": os.path.basename(os.path.normpath(args.run)), "cap_deg": args.cap_deg, "hot": args.hot,
             "fine_stage": args.fine_stage, "cell_px": stride, "coarse_cell_px": 32,
             "epoch": int(ckpt["epoch"]), "val_auc": float(ckpt["val_auc"])}
+    # The heat maps also as plain gray pictures (photo frame, 255 = this eye's strongest spot):
+    # oct3d.py --heat takes one to lay it onto a measured OCT surface.
+    heat_dir = os.path.join(args.run, "eye3d", "heat")
+    os.makedirs(heat_dir, exist_ok=True)
+    for eye in eyes:
+        with open(os.path.join(heat_dir, f"{eye['name']}.png"), "wb") as f:
+            f.write(base64.b64decode(eye["heat_full"].split(",", 1)[1]))
+        del eye["heat_full"]
     path = write_viewer(eyes, meta, os.path.join(args.run, "eye3d"))
     print(f"Open in a browser: {path}  ({os.path.getsize(path) / 1e6:.1f} MB; it contains the photos: do not commit it)")
 

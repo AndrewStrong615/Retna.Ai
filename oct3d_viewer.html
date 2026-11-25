@@ -35,6 +35,9 @@
           overflow-y:auto; padding:14px 16px 24px; }
   h1 { font-size:16px; margin:0 0 2px; }
   h2 { font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); margin:18px 0 6px; }
+  select { font:inherit; color:var(--text); background:#222833; border:1px solid var(--line); border-radius:6px; padding:6px 8px; flex:1; min-width:0; }
+  .tag.good { color:#a8e6b4; border-color:#2d6a3a; } .tag.bad { color:#ffb3aa; border-color:#7a2d26; }
+  .pin.spot { border-color:#ffd84d; }
   button { font:inherit; color:var(--text); background:#222833; border:1px solid var(--line); border-radius:6px; padding:6px 8px; cursor:pointer; }
   button:hover { border-color:var(--accent); }
   .row { display:flex; align-items:center; gap:8px; margin:6px 0; }
@@ -82,7 +85,15 @@
     <div style="color:var(--dim)" id="source"></div>
     <dl class="facts" id="facts"></dl>
 
-    <h2>Thickened areas</h2>
+    <div id="fusionBox" style="display:none">
+      <h2>Photo lined up with the scan</h2>
+      <img id="regCheck" alt="alignment check" style="width:100%;display:block;border:1px solid var(--line);border-radius:6px">
+      <div class="note" id="regText" style="margin-top:6px"></div>
+      <h2>Model hot spots (from the photo)</h2>
+      <div id="hotspots"></div>
+    </div>
+
+    <h2>Thickened areas (measured in the scan)</h2>
     <div id="findings"></div>
 
     <h2>Clicked spot</h2>
@@ -94,7 +105,12 @@
     <div class="note" style="margin-top:2px">Blue line: inner surface found. Yellow line: lower surface found. If a line is off the tissue edge, the numbers there are wrong.</div>
 
     <h2>Display</h2>
-    <div class="row"><label for="thr">Red above</label><input id="thr" type="range" step="1"><output></output></div>
+    <div class="row fusionRow"><label for="texMode">Surface shows</label>
+      <select id="texMode"><option value="1">Fundus photo (lined up)</option><option value="0">OCT seen from above</option></select></div>
+    <div class="row heatRow"><label for="redMode">Red shows</label>
+      <select id="redMode"><option value="1">Model heat (from the photo)</option><option value="0">Retina thickness (measured)</option></select></div>
+    <div class="row heatRow"><label for="heatThr">Hide heat below</label><input id="heatThr" type="range" min="0" max="0.95" step="0.01" value="0.2"><output></output></div>
+    <div class="row"><label for="thr">Thick above</label><input id="thr" type="range" step="1"><output></output></div>
     <div class="row"><label for="opacity">Red strength</label><input id="opacity" type="range" min="0" max="1" step="0.01" value="0.85"><output></output></div>
     <div class="row"><label for="stretch">Stretch the depth</label><input id="stretch" type="range" min="1" max="8" step="0.1" value="3"><output></output></div>
     <div class="row"><label for="showLow">Lower surface</label><input id="showLow" type="checkbox" checked></div>
@@ -112,7 +128,7 @@
       lower than a device's own number. <span id="deviceNote"></span></div>
     <div class="note"><strong>Red = thicker than the threshold</strong>, which by default means clearly thicker than the rest
       of this scan. There is no database of normal eyes behind it. It is a measurement, not a diagnosis.</div>
-    <div class="note"><strong>No AI heat map here yet.</strong> The disease model reads fundus photos and has never seen OCT.</div>
+    <div class="note" id="aiNote"><strong>No AI heat map here.</strong> The disease model reads fundus photos and has never seen OCT. Give oct3d.py a photo of the same eye (--photo, --heat) to lay its findings onto this surface.</div>
   </div>
 </div>
 
@@ -189,7 +205,8 @@ const surface = program(`
     gl_Position = uMVP * vec4((aUV.x - 0.5) * uSize.x, (uSize.z - aDepth) * uStretch, (aUV.y - 0.5) * uSize.y, 1.0);
   }`, `
   precision mediump float;
-  uniform sampler2D uEnFace; uniform float uThr, uMax, uOpacity, uCutV; uniform bool uCut, uLower;
+  uniform sampler2D uEnFace, uPhoto, uHeat; uniform float uThr, uMax, uOpacity, uCutV, uHeatThr;
+  uniform bool uCut, uLower; uniform int uTexMode, uRedMode;
   varying vec2 vUV; varying float vThick; varying vec3 vNormal;
   void main() {
     if (uCut && vUV.y > uCutV) discard;                        // cut away what is in front of the B-scan
@@ -197,9 +214,13 @@ const surface = program(`
     vec3 col;
     if (uLower) col = vec3(0.62, 0.46, 0.26);
     else {
-      col = vec3(0.80, 0.76, 0.74) * (0.45 + 0.55 * texture2D(uEnFace, vUV).r);   // the scan seen from above, as texture
-      if (vThick > uThr) {
-        float t = clamp((vThick - uThr) / max(uMax - uThr, 1.0), 0.0, 1.0);
+      if (uTexMode == 1) col = texture2D(uPhoto, vUV).rgb;                       // the fundus photo, lined up with the scan
+      else col = vec3(0.80, 0.76, 0.74) * (0.45 + 0.55 * texture2D(uEnFace, vUV).r);   // the scan seen from above
+      // What is painted red: the measured thickness, or the model's heat carried over from the photo.
+      float t = -1.0;
+      if (uRedMode == 1) { float h = texture2D(uHeat, vUV).r; if (h > uHeatThr) t = (h - uHeatThr) / (1.0 - uHeatThr); }
+      else if (vThick > uThr) t = clamp((vThick - uThr) / max(uMax - uThr, 1.0), 0.0, 1.0);
+      if (t >= 0.0) {
         vec3 hot = t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8)
                            : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2);
         col = mix(col, hot, uOpacity * (0.45 + 0.55 * t));
@@ -252,7 +273,12 @@ function makeTexture(image) {
 
 // ---------------------------------------------------------------- state and controls
 const state = { yaw: 0.6, pitch: 0.5, dist: 13, target: [0, 0, 0], dirty: true, sel: 0, probe: null };
-const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn"]) ui[id] = $(id);
+const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn", "texMode", "redMode", "heatThr"]) ui[id] = $(id);
+const F = D.fusion || null;                     // the photo (and heat) lined up with this scan, if oct3d.py was given one
+const SPOTS = F ? F.hot_spots : [];
+let photoTex = null, heatTex = null, heatPix = null;
+const heatOn = () => !!heatTex && ui.redMode.value === "1";
+function heatAt(u, v) { if (!heatPix) return 0; const x = Math.min(heatPix.w - 1, Math.max(0, Math.floor(u * heatPix.w))), y = Math.min(heatPix.h - 1, Math.max(0, Math.floor(v * heatPix.h))); return heatPix.data[y * heatPix.w + x] / 255; }
 const redraw = () => { state.dirty = true; };
 const stretch = () => Number(ui.stretch.value);
 const height = depthUm => (D0 - depthUm / 1000) * stretch();          // measured depth -> height in the 3D scene
@@ -266,7 +292,8 @@ function syncOutputs() {
   ui.opacity.nextElementSibling.textContent = fmt(ui.opacity.value * 100) + "%";
   ui.stretch.nextElementSibling.textContent = fmt(ui.stretch.value, 1) + "x";
   ui.slice.nextElementSibling.textContent = (D.slices[Number(ui.slice.value)].scan + 1) + " / " + D.scans;
-  $("legendText").textContent = `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm`;
+  ui.heatThr.nextElementSibling.textContent = fmt(ui.heatThr.value * 100) + "%";
+  $("legendText").textContent = heatOn() ? "model evidence (from the photo): weak → strong" : `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm`;
 }
 for (const id in ui) ui[id].addEventListener("input", () => { if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); drawBscan(); redraw(); });
 
@@ -294,12 +321,33 @@ function renderSide() {
     d.onclick = () => selectFinding(f.id);
     box.appendChild(d);
   });
+  if (F) {
+    const r = F.registration;
+    $("fusionBox").style.display = ""; $("regCheck").src = F.registration_check;
+    $("regText").innerHTML = `<span class="tag ${r.trusted ? "good" : "bad"}">${r.trusted ? "match trusted" : "MATCH NOT TRUSTED"}</span> ` +
+      `Vessel fit ${fmt(r.ncc, 2)} (1 = perfect); wrong maps reach ${fmt(r.control, 2)} by chance, so the real fit is ${fmt(r.ratio, 1)}x the control (needs ${fmt(r.min_ratio, 1)}x). ` +
+      `Photo turned ${fmt(r.angle)}°, its width covers ${fmt(r.photo_mm_per_width, 1)} mm. Left: where the scan lies in the photo. Right: tiles of photo and scan; vessels should run unbroken across tile edges.` +
+      (r.trusted ? "" : " <strong>The photo may not belong to this scan: do not rely on anything the photo adds here.</strong>");
+    const hb = $("hotspots");
+    hb.innerHTML = F.heat_source ? (SPOTS.length ? "" : "<div class='note'>No hot spot of the heat map falls inside the scanned square.</div>") : "<div class='note'>No heat map was given (--heat).</div>";
+    SPOTS.forEach(f => {
+      const d = document.createElement("div"), diff = f.thickness_um - D.thickness_um.median;
+      d.className = "finding" + (f.id === state.sel ? " sel" : "");
+      d.innerHTML = `<b style="color:#ffd84d">${f.id}</b> · heat ${fmt(f.peak_heat * 100)}% · retina under it ${fmt(f.thickness_um)} µm` +
+        `<small>${diff >= 0 ? "+" : ""}${fmt(diff)} µm vs this scan's median · up to ${fmt(f.thickness_max_um)} µm · ${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1}</small>`;
+      d.onclick = () => selectFinding(f.id);
+      hb.appendChild(d);
+    });
+    $("aiNote").innerHTML = F.heat_source ? `<strong>The model's heat was computed on the flat photo</strong> and carried here by the alignment: the model did not look at the depth. Alignment is good to about a vessel's width. Heat source: ${F.heat_source}.`
+      : "<strong>Photo only, no heat map.</strong> The photo is laid on the surface by the alignment; no model findings were given (--heat).";
+  }
   const pins = $("pins"); pins.innerHTML = "";
+  SPOTS.forEach(f => { const d = document.createElement("div"); d.className = "pin spot" + (f.id === state.sel ? " sel" : ""); d.textContent = f.id; d.dataset.id = f.id; d.onclick = () => selectFinding(f.id); pins.appendChild(d); });
   D.findings.forEach(f => { const d = document.createElement("div"); d.className = "pin" + (f.id === state.sel ? " sel" : ""); d.textContent = f.id; d.dataset.id = f.id; d.onclick = () => selectFinding(f.id); pins.appendChild(d); });
 }
 function nearestSlice(scan) { let best = 0; D.slices.forEach((s, i) => { if (Math.abs(s.scan - scan) < Math.abs(D.slices[best].scan - scan)) best = i; }); return best; }
 function selectFinding(id) {
-  state.sel = id; const f = D.findings.find(f => f.id === id);
+  state.sel = id; const f = D.findings.concat(SPOTS).find(f => f.id === id);
   ui.slice.value = nearestSlice(f.scan); state.probe = { u: f.u, v: f.v };
   flyTo({ target: worldOf(f.u, f.v, at(ILM, f.u, f.v)), dist: 7, yaw: 0.5, pitch: 0.6 });
   renderSide(); syncOutputs(); drawBscan(); redraw();
@@ -366,7 +414,8 @@ function probe(hit) {
   ui.slice.value = nearestSlice(scan);
   box.innerHTML = `<strong>Retina thickness here: ${fmt(th)} µm</strong> (median of this scan: ${fmt(D.thickness_um.median)} µm).<br>` +
     `${fmt(Math.abs(x), 2)} mm ${x >= 0 ? "right" : "left"} of the centre, ${fmt(Math.abs(z), 2)} mm ${z >= 0 ? "toward the last" : "toward the first"} scan (B-scan ${scan + 1}). ` +
-    `Inner surface ${fmt(at(ILM, hit.u, hit.v))} µm below the top of the scan.`;
+    `Inner surface ${fmt(at(ILM, hit.u, hit.v))} µm below the top of the scan.` +
+    (heatPix ? ` <strong>Model heat here: ${fmt(heatAt(hit.u, hit.v) * 100)}%</strong> of the photo's strongest spot.` : "");
   syncOutputs(); drawBscan(); redraw();
 }
 
@@ -395,6 +444,10 @@ function drawSurface(m, lower, cam) {
   gl.uniform1f(U("uThr"), Number(ui.thr.value)); gl.uniform1f(U("uMax"), tMax); gl.uniform1f(U("uOpacity"), Number(ui.opacity.value));
   gl.uniform1i(U("uLower"), lower ? 1 : 0); gl.uniform1i(U("uCut"), ui.cut.checked && ui.showSlice.checked ? 1 : 0); gl.uniform1f(U("uCutV"), sliceV() + 0.25 / D.scans);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, enFaceTex); gl.uniform1i(U("uEnFace"), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, photoTex || enFaceTex); gl.uniform1i(U("uPhoto"), 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, heatTex || enFaceTex); gl.uniform1i(U("uHeat"), 2);
+  gl.uniform1i(U("uTexMode"), photoTex && ui.texMode.value === "1" ? 1 : 0); gl.uniform1i(U("uRedMode"), heatOn() ? 1 : 0);
+  gl.uniform1f(U("uHeatThr"), Number(ui.heatThr.value));
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIndex); gl.drawElements(gl.TRIANGLES, index.length, gl.UNSIGNED_SHORT, 0);
 }
 function drawLines(segments, color, cam) {
@@ -444,7 +497,7 @@ function frame(now) {
   drawLines(box, [0.75, 0.82, 0.95, 0.22], cam);
   if (ui.showSlice.checked) drawLines([-X, top, z, X, top, z,  X, top, z, X, bottom, z,  X, bottom, z, -X, bottom, z,  -X, bottom, z, -X, top, z], [0.42, 0.77, 1, 0.9], cam);
   const tips = [], stalks = [];
-  for (const f of D.findings) {
+  for (const f of D.findings.concat(SPOTS)) {
     const base = worldOf(f.u, f.v, at(ILM, f.u, f.v)), tip = add(base, [0, 0.12 * Math.max(W, L), 0]);
     tips.push([f.id, tip]); stalks.push(...base, ...tip);
   }
@@ -452,6 +505,7 @@ function frame(now) {
   if (ui.pinsOn.checked) drawLines(stalks, [1, 0.35, 0.28, 0.9], cam);
   for (const [id, tip] of tips) {
     const el = document.querySelector(`.pin[data-id="${id}"]`); if (!el) continue;
+    if (typeof id === "string") tip[0] += 0.04 * Math.max(W, L);      // model hot spots (letters): nudged aside so a number stays visible
     const m = cam.mvp, x = m[0] * tip[0] + m[4] * tip[1] + m[8] * tip[2] + m[12], y = m[1] * tip[0] + m[5] * tip[1] + m[9] * tip[2] + m[13], wc = m[3] * tip[0] + m[7] * tip[1] + m[11] * tip[2] + m[15];
     const on = wc > 0.05 && Math.abs(x / wc) < 1 && Math.abs(y / wc) < 1;
     el.style.display = on ? "" : "none";
@@ -464,6 +518,17 @@ function frame(now) {
   ui.thr.min = Math.floor(tMin); ui.thr.max = Math.ceil(tMax); ui.thr.value = Math.round(D.threshold_um);
   ui.slice.max = D.slices.length - 1; ui.slice.value = nearestSlice(D.findings.length ? D.findings[0].scan : Math.floor(D.scans / 2));
   enFaceTex = makeTexture(await loadImage(D.en_face));
+  if (F) {
+    photoTex = makeTexture(await loadImage(F.photo_on_scan));
+    if (F.heat_on_scan) {
+      const im = await loadImage(F.heat_on_scan); heatTex = makeTexture(im);
+      const c = document.createElement("canvas"); c.width = im.width; c.height = im.height; const ctx = c.getContext("2d"); ctx.drawImage(im, 0, 0);
+      const rgba = ctx.getImageData(0, 0, c.width, c.height).data; heatPix = { w: c.width, h: c.height, data: new Uint8Array(c.width * c.height) };
+      for (let i = 0; i < heatPix.data.length; i++) heatPix.data[i] = rgba[i * 4];
+    }
+  }
+  document.querySelectorAll(".fusionRow").forEach(e => e.style.display = photoTex ? "" : "none");
+  document.querySelectorAll(".heatRow").forEach(e => e.style.display = heatTex ? "" : "none");
   const images = await Promise.all(D.slices.map(s => loadImage(s.img)));
   images.forEach((im, i) => { sliceImg[i] = im; sliceTex[i] = makeTexture(im); });
   setView("three"); renderSide(); syncOutputs(); drawBscan(); requestAnimationFrame(frame);
