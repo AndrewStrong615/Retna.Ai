@@ -23,6 +23,7 @@ What it checks:
 It prints PASS or FAIL for each check and exits with an error if anything failed.
 """
 
+import csv
 import json
 import os
 import shutil
@@ -929,6 +930,69 @@ def test_photo2oct(tmp):
           and '"heat_on_scan"' in page and info.get("thickened_vs_average") == [])
 
 
+def test_convert_olives(tmp):
+    """convert_olives.py on a made-up OLIVES tree: a cartoon volume + a grey 'infrared' picture whose middle 2/3 shows
+    the same vessels, in OLIVES' folder layout (B-scan 0 = the bottom row)."""
+    from PIL import Image
+    import photo2oct as p2o
+    from oct3d import draw_paths, synthetic_vessels, synthetic_volume
+    hi = 512
+    mask_hi = draw_paths(synthetic_vessels(0, 0), lambda p: (p + 3) / 6 * hi, hi, hi / 6)      # the 6 x 6 mm scan square
+    rows = np.clip(((np.arange(49) + 0.5) / 49 * hi).astype(int), 0, hi - 1)
+    vol, spacing, ilm, low = synthetic_volume(n_scans=49, depth=512, width=256, seed=0,
+                                              vessel_mask=mask_hi[rows].reshape(49, 256, 2).mean(axis=2))
+    true_um = (low - ilm) * spacing["dz"]                                                 # depth 512 over 2 mm = 3.9 um per px
+    vessels = draw_paths(synthetic_vessels(0, 0), lambda p: (p + 4.5) / 9 * 384, 384, 384 / 9)   # the 9 mm picture
+    fundus = Image.fromarray(np.clip(150 - 90 * vessels + np.random.default_rng(0).normal(0, 3, vessels.shape), 0, 255).astype(np.uint8))
+    src = os.path.join(tmp, "olives")
+    folders = ["Prime_FULL/01-001/W0/OS", "Prime_FULL/01-001/W0/OD", "TREX DME/GILA/0201GOD/V1/OD", "Prime_FULL/01-002/W4/OS"]
+    for k, folder in enumerate(folders):
+        os.makedirs(os.path.join(src, folder))
+        for i in range(49 if k < 3 else 40):                                              # the last folder is incomplete
+            Image.fromarray(vol[i]).save(os.path.join(src, folder, f"{48 - i}.png" if k < 2 else f"TREXJ_{48 - i:06d}.tif"))
+        fundus.save(os.path.join(src, folder, "fundus_x.tif"))
+    with open(os.path.join(tmp, "olives_clinical.csv"), "w") as f:
+        f.write("File_Path,BCVA,CST,Eye_ID,Patient_ID\n")
+    pairs = os.path.join(tmp, "olives_pairs")
+    code, log = run(["convert_olives.py", "--src", src, "--pairs", pairs, "--workers", "1"])
+    again, _ = run(["convert_olives.py", "--src", src, "--pairs", pairs, "--workers", "1"])
+    ok = code == 0 and os.path.exists(os.path.join(pairs, "pairs.csv"))
+    table = list(csv.DictReader(open(os.path.join(pairs, "olives_table.csv")))) if ok else []
+    notes = p2o.pairs_info(pairs) if ok else {}
+    names = {r["folder"]: r for r in table}
+    check("convert_olives: 3 complete scan folders become pairs of 2 patients (PRIME and TREX names read), the incomplete "
+          "one is left out, the folder is marked grey; refuses to write into the same folder twice",
+          ok and again != 0 and len(table) == 3 and notes.get("pairs") == 3 and notes.get("patients") == 2 and notes.get("input") == "grey"
+          and names[folders[0]]["patient"] == "prime_01-001" and names[folders[2]]["patient"] == "trex_0201", log[-300:])
+    if ok:
+        left = np.load(os.path.join(pairs, names[folders[0]]["name"] + ".npy"))
+        right = np.load(os.path.join(pairs, names[folders[1]]["name"] + ".npy"))
+        want = np.asarray(Image.fromarray(true_um.astype(np.float32), mode="F").resize((64, 64), Image.Resampling.BILINEAR))
+        crop = np.asarray(Image.open(os.path.join(pairs, names[folders[0]]["name"] + ".png")))
+        on_vessel = np.asarray(Image.fromarray(mask_hi.astype(np.float32), mode="F").resize((128, 128), Image.Resampling.BILINEAR)) > 0.5
+        check("convert_olives: the thickness map is the volume's known thickness (within 12 um on average), the right eye "
+              "is the left eye mirrored, and the vessel check finds the scan in the middle of the picture",
+              np.abs(left - want).mean() < 12 and np.allclose(right, left[:, ::-1])
+              and all(r["trusted"] == "True" and abs(float(r["centre_x"]) - 0.5) < 0.03 and abs(float(r["centre_y"]) - 0.5) < 0.03
+                      for r in table),
+              f"mean difference {np.abs(left - want).mean():.1f} um")
+        check("convert_olives: the cut-out picture shows the scan square right way up (dark where the scan's vessels run)",
+              crop[on_vessel].mean() < crop[~on_vessel].mean() - 20)
+    grey = np.random.default_rng(1).integers(40, 200, (128, 128, 3)).astype(np.uint8)
+    check("photo2oct: a grey input is standardized (a darker, flatter copy of the picture gives the same network input)",
+          np.allclose(p2o.to_input(grey, True), p2o.to_input((grey * 0.5 + 20).astype(np.uint8), True), atol=0.05)
+          and np.allclose(p2o.to_input(grey, True)[0], p2o.to_input(grey, True)[2]))
+    # Augmentation: picture and map must move TOGETHER. A map that is the picture at half size makes that checkable.
+    pics = torch.rand(6, 3, 128, 128)
+    maps = torch.nn.functional.avg_pool2d(pics[:, :1], 2)[:, 0]
+    xa, ya = p2o.augmented(pics, maps, np.random.default_rng(0))
+    same, _ = p2o.augmented(pics, maps, np.random.default_rng(0))
+    check("photo2oct: augmentation flips/shifts picture and map together (the map still is the picture at half size), "
+          "changes the pairs, keeps the sizes, and repeats with the same seed",
+          xa.shape == pics.shape and ya.shape == maps.shape and torch.equal(xa, same) and not torch.equal(xa, pics)
+          and torch.allclose(torch.nn.functional.avg_pool2d(xa[:, :1], 2)[:, 0], ya, atol=1e-6))
+
+
 def test_vit():
     from vit import _checks
     for name, ok in _checks().items():
@@ -944,6 +1008,7 @@ def main():
         test_saving(tmp)
         test_oct3d(tmp)
         test_photo2oct(tmp)
+        test_convert_olives(tmp)
         test_end_to_end(tmp)
     print()
     if failures:

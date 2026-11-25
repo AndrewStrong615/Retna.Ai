@@ -19,9 +19,11 @@ things that tend to go with it. There are two guessers, and they are very differ
   2. The NETWORK (ThicknessNet, written here from scratch, starts from random weights).
      It looks at the macula in the photo and predicts how THIS eye DIFFERS from the atlas
      (e.g. "thicker here, where there are yellow spots"). That needs training on PAIRS:
-     photo + real OCT of the same eye. No such real pairs exist in this project yet, so
-     the network has only ever been trained on cartoon pairs (to check that the code
-     learns). A network trained on cartoons says nothing about a real photo.
+     photo + real OCT of the same eye. The only real pairs so far: OLIVES (convert_olives.py),
+     3,104 NEAR-INFRARED pictures of 87 patients. Trained on them (2026-11-25) the network
+     was about as good as answering the average map (held-out error 40.4 um vs 40.5): 61
+     training patients are far too few. And a colour photo is not an infrared picture.
+     A network trained on cartoons (`synthetic-pairs`) says nothing about a real photo.
      Published work with ~97,000 real pairs (Holmberg et al. 2020, infrared fundus
      pictures) reached an average error of ~33 um, and worse where it matters (50-60 um
      on thick retinas): "rough" is the right word even with plenty of data.
@@ -58,6 +60,7 @@ Usage:
   python photo2oct.py synthetic-pairs --out pairs_demo --eyes 300      (cartoon pairs, to test the code)
   python photo2oct.py make-pair --oct runs\\oct_eye1 --photo eye.jpg --patient P17 --nasal left --pairs pairs_real
   python photo2oct.py train --pairs pairs_demo --out runs\\p2o_net
+  python photo2oct.py train --pairs pairs_olives --out runs\\p2o_olives --epochs 60 --augment
 """
 
 import argparse
@@ -270,9 +273,22 @@ def build_net():
     return ThicknessNet()
 
 
-def to_input(crop_rgb):
-    """128 x 128 RGB crop (uint8, disc side on the LEFT) -> network input [3, 128, 128], about -1..1."""
-    return (np.asarray(crop_rgb, dtype=np.float32) / 127.5 - 1).transpose(2, 0, 1)
+def to_input(crop_rgb, grey=False):
+    """
+    128 x 128 RGB crop (uint8, disc side on the LEFT) -> network input [3, 128, 128], about -1..1.
+    grey=True (pairs without colour, e.g. OLIVES' near-infrared pictures): the three colours are
+    averaged into one grey picture, which is then STANDARDIZED on its own (minus its mean, divided
+    by twice its spread) and given to all 3 input channels. Standardizing removes overall
+    brightness and contrast, which differ between an infrared picture and a colour photo turned
+    grey, so the network sees only the pattern. It does NOT make a colour photo look infrared:
+    infrared light shows deeper layers, so the same eye looks different in the two.
+    """
+    crop = np.asarray(crop_rgb, dtype=np.float32)
+    if grey:
+        g = crop.mean(axis=-1)
+        g = np.clip((g - g.mean()) / (2 * g.std() + 1e-6), -2, 2)
+        return np.stack([g, g, g]).astype(np.float32)
+    return (crop / 127.5 - 1).transpose(2, 0, 1)
 
 
 def macula_crop(rgb, matrix, nasal):
@@ -290,7 +306,8 @@ def predict_thickness(model_path, crop_rgb):
     net.load_state_dict(saved["model"])
     net.eval()
     with torch.no_grad():
-        resid = net(torch.from_numpy(to_input(crop_rgb))[None])[0, 0].numpy() * RESID_UM
+        grey = saved.get("meta", {}).get("input") == "grey"            # trained on colourless pictures: feed grey
+        resid = net(torch.from_numpy(to_input(crop_rgb, grey))[None])[0, 0].numpy() * RESID_UM
     return atlas_thickness(OUT_PX, "left") + resid, saved.get("meta", {})
 
 
@@ -350,12 +367,22 @@ def synthetic_pair(seed):
     return crop, thick.astype(np.float32), count
 
 
+def pairs_info(folder):
+    """A pairs folder's own notes (pairs.json, written by convert_olives.py), or {} for the plain folders."""
+    path = os.path.join(folder, "pairs.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
 def load_pairs(folder):
     with open(os.path.join(folder, "pairs.csv"), newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
         raise SystemExit(f"{folder}/pairs.csv is empty.")
-    x = np.stack([to_input(Image.open(os.path.join(folder, r["name"] + ".png")).convert("RGB")) for r in rows])
+    grey = pairs_info(folder).get("input") == "grey"
+    x = np.stack([to_input(Image.open(os.path.join(folder, r["name"] + ".png")).convert("RGB"), grey) for r in rows])
     y = np.stack([np.load(os.path.join(folder, r["name"] + ".npy")) for r in rows])
     return x, y, [r["patient"] for r in rows]
 
@@ -373,7 +400,39 @@ def split_patients(patients, seed=0):
     return ~(in_val | in_test), in_val, in_test
 
 
-def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print):
+def augmented(x, y, rng, max_shift=4):
+    """
+    One training batch seen a little differently each time, so the network cannot simply memorize the
+    few hundred eyes it has (many pairs are the SAME eye at another visit). x: pictures [n, 3, 128, 128],
+    y: thickness maps in um [n, 64, 64] (the thickness itself, not yet 'minus the atlas').
+    Per pair, picture and map TOGETHER:
+      - turned upside down with probability 1/2 (the disc stays on the left; above and below the fovea the
+        retina is built alike, so an upside-down macula is still a believable macula);
+      - moved by up to `max_shift` map cells (= 2 picture pixels each, about 0.4 mm at most) sideways and
+        up/down; the strip that moves in is filled by mirroring the edge. The scan is never centred on the
+        fovea exactly, so the network should not rely on where things sit to the pixel.
+    """
+    import torch
+    p = max_shift
+
+    def mirrored(t, k):                                  # k more rows/columns on every side, the edge mirrored
+        t = torch.cat([t.flip(-1)[..., t.shape[-1] - k:], t, t.flip(-1)[..., :k]], dim=-1)
+        return torch.cat([t.flip(-2)[..., t.shape[-2] - k:, :], t, t.flip(-2)[..., :k, :]], dim=-2)
+
+    xp, yp = mirrored(x, 2 * p), mirrored(y, p)
+    xs, ys = [], []
+    for i in range(len(x)):
+        dx, dy = (int(v) for v in rng.integers(-p, p + 1, 2))
+        a = xp[i, :, 2 * (p + dy):2 * (p + dy) + IN_PX, 2 * (p + dx):2 * (p + dx) + IN_PX]
+        b = yp[i, p + dy:p + dy + OUT_PX, p + dx:p + dx + OUT_PX]
+        if rng.random() < 0.5:
+            a, b = a.flip(1), b.flip(0)
+        xs.append(a)
+        ys.append(b)
+    return torch.stack(xs), torch.stack(ys)
+
+
+def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=False, wd=1e-4, test=True):
     """
     Train ThicknessNet on a pairs folder. Loss: mean absolute error (L1) between the
     predicted and the real thickness map, in um / 100.
@@ -383,6 +442,10 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print):
       - 'atlas':    answer the average healthy map for everyone;
       - 'mean map': answer the average of the TRAINING maps for everyone.
     A network that does not clearly beat both has learned nothing from the photo.
+    The same two yardsticks are also reported on the VALIDATION patients, to judge a recipe without the test.
+    augment: see `augmented` (off = the plain loop, same numbers as before). wd: weight decay.
+    test=False: do not look at the test patients at all (for trying recipes; choose on validation, then
+    run the chosen recipe once with the test).
     """
     import torch
     if os.path.exists(os.path.join(out, "model.pt")):
@@ -395,10 +458,11 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print):
     resid = (y - atlas)[:, None] / RESID_UM                              # what the network must answer
     torch.manual_seed(seed)
     net = build_net()
-    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
+    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=wd)
     steps = epochs * int(np.ceil(tr.sum() / batch))
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps)   # warm-up, then a cosine fall
     xt, rt = torch.from_numpy(x), torch.from_numpy(resid.astype(np.float32))
+    yt, atlas_t = torch.from_numpy(y), torch.from_numpy(atlas)
     idx_tr = np.nonzero(tr)[0]
     rng = np.random.default_rng(seed)
 
@@ -415,7 +479,11 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print):
         order = rng.permutation(idx_tr)                                   # a new random order every epoch
         for start in range(0, len(order), batch):
             pick = order[start:start + batch]
-            loss = (net(xt[pick]) - rt[pick]).abs().mean()
+            if augment:
+                xb, yb = augmented(xt[pick], yt[pick], rng)
+                loss = (net(xb) - ((yb - atlas_t) / RESID_UM)[:, None]).abs().mean()
+            else:
+                loss = (net(xt[pick]) - rt[pick]).abs().mean()
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -428,16 +496,30 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print):
         if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
             log(f"epoch {epoch:3d}: train L1 {history[-1]['train_loss_um']:.1f} um, validation error {val_mae:.1f} um")
     net.load_state_dict(best_state)
-    test_mae, pred = mae(te)                                              # the single look at the test patients
     mean_map = y[tr].mean(axis=0)
     results = {"pairs": len(y), "patients": len(set(patients)), "train/val/test pairs": [int(tr.sum()), int(va.sum()), int(te.sum())],
-               "best_val_mae_um": best, "test_mae_um": test_mae,
+               "augment": bool(augment), "wd": wd, "lr": lr,
+               "best_val_mae_um": best, "best_epoch": int(np.argmin([h["val_mae_um"] for h in history])) + 1,
+               "val_mae_atlas_um": float(np.abs(atlas - y[va]).mean()),
+               "val_mae_mean_map_um": float(np.abs(mean_map - y[va]).mean())}
+    log(f"VALIDATION patients: network {best:.1f} um (best epoch {results['best_epoch']}) | atlas for everyone "
+        f"{results['val_mae_atlas_um']:.1f} um | mean training map {results['val_mae_mean_map_um']:.1f} um")
+    if not test:
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "results_val_only.json"), "w") as f:
+            json.dump({**results, "history": history}, f, indent=2)
+        log("Test patients not looked at (--no-test): no model saved; rerun the chosen recipe without --no-test.")
+        return results
+    test_mae, pred = mae(te)                                              # the single look at the test patients
+    results.update({"test_mae_um": test_mae,
                "test_mae_atlas_um": float(np.abs(atlas - y[te]).mean()),
                "test_mae_mean_map_um": float(np.abs(mean_map - y[te]).mean()),
                "test_peak_error_um": float(np.abs(pred.max(axis=(1, 2)) - y[te].max(axis=(1, 2))).mean()),
-               "test_peak_error_atlas_um": float(np.abs(atlas.max() - y[te].max(axis=(1, 2))).mean())}
+               "test_peak_error_atlas_um": float(np.abs(atlas.max() - y[te].max(axis=(1, 2))).mean())})
     os.makedirs(out, exist_ok=True)
-    meta = {"pairs_folder": os.path.basename(os.path.normpath(pairs)), "epochs": epochs, "seed": seed, **results}
+    notes = pairs_info(pairs)
+    meta = {"pairs_folder": os.path.basename(os.path.normpath(pairs)), "epochs": epochs, "seed": seed,
+            "input": notes.get("input", "colour"), "source": notes.get("source"), **results}
     torch.save({"model": best_state, "meta": meta}, os.path.join(out, "model.pt"))
     with open(os.path.join(out, "results.json"), "w") as f:
         json.dump({**results, "history": history}, f, indent=2)
@@ -534,6 +616,10 @@ def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False
         basis = (f"the average healthy map PLUS the correction of a network trained on {meta.get('pairs', '?')} pairs from "
                  f"'{meta.get('pairs_folder', '?')}' (its error on held-out pairs of that kind: {meta.get('test_mae_um', float('nan')):.0f} um). "
                  "It is only as good as those pairs are like this photo.")
+        if meta.get("input") == "grey":
+            basis += (" Those pairs had no colour (near-infrared pictures from the OCT machine), so this photo was turned "
+                      "grey first; a colour photo turned grey is NOT an infrared picture, and the error above was "
+                      "measured on infrared pictures only.")
     else:
         thick = atlas_thickness(OUT_PX, nasal)
         method = "atlas"
@@ -677,6 +763,9 @@ def main():
     t.add_argument("--batch", type=int, default=32)
     t.add_argument("--lr", type=float, default=2e-3)
     t.add_argument("--seed", type=int, default=0)
+    t.add_argument("--augment", action="store_true", help="flip upside down and shift each training pair at random")
+    t.add_argument("--wd", type=float, default=1e-4, help="weight decay")
+    t.add_argument("--no-test", action="store_true", help="validation only, nothing saved: for choosing a recipe")
     args = p.parse_args()
     if args.cmd == "estimate":
         estimate(args.photo, args.out, args.model, args.disc, args.fovea, args.overwrite, heat_path=args.heat,
@@ -690,7 +779,8 @@ def main():
         make_pair(args.oct, args.photo, args.patient, args.nasal, args.pairs, args.name)
         print(f"Pair added to {args.pairs}")
     else:
-        train(args.pairs, args.out, args.epochs, args.batch, args.lr, args.seed)
+        train(args.pairs, args.out, args.epochs, args.batch, args.lr, args.seed, augment=args.augment, wd=args.wd,
+              test=not args.no_test)
 
 
 if __name__ == "__main__":

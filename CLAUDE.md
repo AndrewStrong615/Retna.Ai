@@ -199,7 +199,7 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   data and switches. Real data caveat:
   OLIVES pairs OCT with NEAR-INFRARED fundus pictures (as recalled; verify on download), not the colour photos the
   model was trained on: fine for testing registration, out of domain for the model's heat.
-- `photo2oct.py` (photo -> ROUGH ESTIMATE of the macular OCT; real photos: only the atlas, on one internet photo):
+- `photo2oct.py` (photo -> ROUGH ESTIMATE of the macular OCT; network trained once on OLIVES, see convert_olives.py below):
   a photo holds no depth, so this guesses. Two guessers. (1) ATLAS (works now, nothing trained): finds the optic disc
   (brightest blob) and the fovea (darkest smooth spot beside it) with classical filters and lays the thickness map of
   an AVERAGE HEALTHY eye (pit 225 um, ring ~345 um at 1 mm, thicker toward the disc; approximate published Spectralis
@@ -233,6 +233,34 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   party); Harvard FairVision (30,000 SLO + OCT, CC BY-NC-ND, non-commercial research only, ~600 GB); MultiEYE is
   UNPAIRED. Published yardstick: Holmberg et al. 2020, ~97,000 infrared pairs, mean error 33 um (50-61 um on thick
   retinas). Never commit pairs, real photos or pages.
+  `train` switches: `--augment` (each training pair flipped upside down / shifted up to 4 map cells at random,
+  picture and map together; off = the old loop), `--wd`, `--no-test` (validation only, nothing saved: for choosing a
+  recipe). It now also prints the two no-network yardsticks on the VALIDATION patients. Pairs marked grey
+  (`pairs.json` `"input": "grey"`) are fed as one grey picture standardized on its own; the model remembers it and
+  `estimate` then turns a colour photo grey first.
+- `convert_olives.py`: OLIVES -> a pairs folder, read straight from `Prime_FULL.zip` / `TREX_DME.zip` (the two zips
+  inside OLIVES.zip; nothing unpacked). Per visit folder (49 B-scans 504 x 496 + one 768 px near-infrared fundus
+  picture): thickness by `oct3d.find_layers` (ILM to the top of the photoreceptor band) + ONE constant fitted to the
+  machine's own central thickness (CST in `Clinical_Data_Images.xlsx`); the scan square is the picture's central 2/3
+  and B-scan 0 is the BOTTOM row (both found with register.py, then checked per folder: a trusted vessel match is used,
+  else the central 2/3); right eyes mirrored; patient = trial number (`prime_01-001`, `trex_0201`). Writes
+  pairs.json (CST fit, placement check, `input: grey`) and olives_table.csv. ~1 h on 4 CPU cores.
+  FIRST REAL TRAINING (2026-11-25, cloud CPU, OLIVES downloaded from Zenodo): 3,104 pairs of 87 patients (4 scans
+  left out); CST check on 1,585 labelled visits: machine = ours + 52 um, correlation 0.967, median difference 12 um,
+  84% within 25 um (PRIME alone +60, TREX alone +45; thick retinas come out ~15 um too thin); 2,099 of 3,104 vessel
+  matches trusted, median centre offset 1.7% of the picture. Split 61 / 13 / 13 patients.
+  Run 1 (plain loop, 30 epochs): memorized (train 15 um, validation ~30); best validation 26.9 um vs atlas 28.4;
+  TEST 41.2 um vs atlas 40.9 vs mean training map 40.5: nothing learned. Two validation-only tries with `--augment`
+  (default lr/wd; `--wd 0.05 --lr 1e-3`): 26.6 / 26.5 um, no more memorizing (train ~28). Final: `--augment
+  --epochs 60`: validation **26.1 um** (epoch 44) vs atlas 28.4 / mean map 30.6; TEST (scored once) **40.4 um** vs
+  atlas 40.9 / mean map 40.5; thickest point off by 96 um vs 116. VERDICT: on infrared pictures the network is
+  about 2 um (validation) / 0.5 um (test) better than answering the average map: it has learned almost nothing
+  about the individual eye. 61 training patients are far too few (Holmberg et al.: ~97,000 pairs for 33 um). Test
+  patients have more swelling than validation ones (atlas 40.9 vs 28.4), and that is where the error sits.
+  The Wikimedia normal-eye COLOUR photo through this network: centre 222 um (atlas 275; a normal Spectralis centre
+  is ~270), so on a colour photo the correction is probably WRONG: out of domain, as warned. Until there are far
+  more pairs (and colour ones), the atlas stays the more honest estimate for a colour photo.
+  model.pt and the pairs are kept in the project's shared files (`photo2oct/olives_net/`), never in the repo.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
