@@ -638,6 +638,295 @@ def test_end_to_end(tmp):
         code, log = run(["heatmap.py", "--run", out, "--images", tight, "--per-group", "1"])
         pngs = os.listdir(os.path.join(out, "heatmaps")) if code == 0 else []
         check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
+        # The 3D eye page: same eyes as heatmap.py, written as one web page plus a table.
+        code, log = run(["eye3d.py", "--run", out, "--images", tight, "--per-group", "1"])
+        if code != 0:
+            print(log[-3000:])
+        view = os.path.join(out, "eye3d")
+        page = open(os.path.join(view, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
+        table = json.load(open(os.path.join(view, "findings.json"))) if code == 0 else {"eyes": []}
+        val_names = set(pd.read_csv(os.path.join(out, "val_predictions.csv"))["image"].astype(str))
+        check("eye3d.py writes the 3D page (photos embedded, marker filled) and heat pictures, for validation eyes only",
+              code == 0 and "/*EYE_DATA*/" not in page and page.count("data:image/jpeg;base64,") == len(table["eyes"]) > 0
+              and all(e["name"] in val_names for e in table["eyes"])
+              and all(Image.open(os.path.join(view, "heat", e["name"] + ".png")).size == (e["size"], e["size"])
+                      for e in table["eyes"]))
+        code, log = run(["eye3d.py", "--run", out, "--images", tight, "--image",
+                         str(pd.read_csv(os.path.join(out, "test_split.csv"))["image"].iloc[0])])
+        check("eye3d.py refuses test images", code != 0 and "TEST images" in log)
+
+
+def test_eye3d():
+    """The hand-written pieces of eye3d.py, on pictures whose right answer is known."""
+    from eye3d import MultiScaleCAM, find_findings, label_regions, vessel_sketch
+    from heatmap import GradCAM
+    from model import build_model
+    # Regions: two blobs joined only by a corner count as one; a separate pixel is its own.
+    mask = np.zeros((6, 6), dtype=bool)
+    mask[0:2, 0:2] = mask[2:4, 2:4] = mask[5, 5] = True
+    labels, count = label_regions(mask)
+    check("eye3d: connected regions (corner contact joins, gaps separate)",
+          count == 2 and labels[0, 0] == labels[3, 3] != labels[5, 5] and (labels > 0).sum() == mask.sum())
+    # Vessel sketch: a long dark line is kept, a round dark blob is not.
+    rgb = np.full((128, 128, 3), 150, dtype=np.uint8)
+    rgb[62:65, 10:118] = 40                       # the "vessel"
+    yy, xx = np.mgrid[:128, :128]
+    blob = (yy - 100) ** 2 + (xx - 40) ** 2 < 8 ** 2
+    rgb[blob] = 40                                # the "hemorrhage"
+    eye = np.ones((128, 128), dtype=bool)
+    vessels = vessel_sketch(rgb, eye)
+    check("eye3d: vessel sketch keeps a thin dark line and drops a round dark blob",
+          vessels[63, 20:108].mean() > 0.9 and vessels[blob].mean() < 0.05)
+    # Findings: heat placed on the blob is reported there, as a dark spot, at the right clock position.
+    heat = np.exp(-((yy - 100) ** 2 + (xx - 40) ** 2) / (2 * 6.0 ** 2)).astype(np.float32)
+    found, numbered = find_findings(heat, rgb, eye, vessels)
+    f = found[0] if found else {}
+    check("eye3d: a hot dark blob becomes finding #1 (lower left = 7 o'clock, darker, not on a vessel)",
+          len(found) == 1 and f["clock"] == 7 and f["tone"] < -0.5 and f["on_vessel_pct"] < 30
+          and numbered[100, 40] == 1 and abs(f["x"] - (40 - 63.5) / 64) < 0.03 and abs(f["y"] - (63.5 - 100) / 64) < 0.03)
+    # Heat: the region map is exactly heatmap.py's Grad-CAM; the sharpened map stays in 0..1.
+    torch.manual_seed(0)
+    x = torch.randn(1, 3, 96, 96)
+    net_a, net_b = build_model().eval(), build_model().eval()
+    for m in net_a.modules():                     # a fresh network's blocks start as pass-throughs with a near-zero
+        if isinstance(m, torch.nn.BatchNorm2d):   # head; give it weights that make every layer matter
+            torch.nn.init.normal_(m.weight, 1.0, 0.2)
+    torch.nn.init.normal_(net_a.head.weight, 0, 1.0)
+    net_b.load_state_dict(net_a.state_dict())
+    old_map, old_peak, old_score = GradCAM(net_a)(x)
+    heat, coarse, peak, score = MultiScaleCAM(net_b, fine_stage=2)(x)
+    plain = MultiScaleCAM(build_model().eval(), fine_stage=0)(x)
+    check("eye3d: region map = heatmap.py's Grad-CAM; sharpened map in 0..1 with its peak at 1; stage 0 = plain",
+          np.allclose(coarse, old_map, atol=1e-6) and abs(peak - old_peak) < 1e-6 and abs(score - old_score) < 1e-6
+          and heat.min() >= 0 and abs(heat.max() - 1) < 1e-4 and not np.allclose(heat, coarse)
+          and plain[0] is plain[1])
+
+
+def test_oct3d(tmp):
+    """oct3d.py: the surface finder against a volume with a known answer, the readers, and the page."""
+    import itertools
+    import struct
+    from oct3d import best_path, find_layers, load_volume, synthetic_volume, thick_findings, default_threshold
+    # Dynamic programming must find the same best path as trying every path (tiny case: 4^5 paths).
+    rng = np.random.default_rng(0)
+    score = rng.normal(size=(1, 4, 5)).astype(np.float32)
+    def total(path):
+        moves = [abs(a - b) for a, b in zip(path, path[1:])]
+        return -np.inf if max(moves) > 1 else sum(score[0, z, x] for x, z in enumerate(path)) - 0.5 * sum(moves)
+    brute = max(itertools.product(range(4), repeat=5), key=total)
+    check("oct3d: dynamic programming finds the same best path as trying all 1,024 paths",
+          tuple(best_path(score, jump=1, bend_cost=0.5)[0]) == brute)
+    vol, spacing, true_ilm, true_low = synthetic_volume()
+    ilm, low = find_layers(vol, spacing)
+    err_ilm, err_low = np.abs(ilm - true_ilm).mean() * spacing["dz"], np.abs(low - true_low).mean() * spacing["dz"]
+    check("oct3d: both surfaces of the synthetic volume found within 8 um on average (pixel = 7.8 um)",
+          err_ilm < 8 and err_low < 8, f"ILM {err_ilm:.1f} um, lower {err_low:.1f} um")
+    thick = (low - ilm) * spacing["dz"]
+    found, _ = thick_findings(thick, spacing, default_threshold(thick))
+    f = found[0] if found else {}
+    check("oct3d: the one swollen area is found where it was drawn (1.5 mm right, 1 mm toward the first scan, ~500 um)",
+          len(found) == 1 and abs(f["x_mm"] - 1.5) < 0.15 and abs(f["y_mm"] + 1.0) < 0.15 and abs(f["peak_um"] - 500) < 25)
+    # Readers. Folder: numbers in names order the scans (2 before 10); mixed sizes refused.
+    folder = os.path.join(tmp, "oct_folder")
+    os.makedirs(folder)
+    for i in range(12):
+        Image.fromarray(vol[i]).save(os.path.join(folder, f"scan_{i}.png"))
+    read, sp, _ = load_volume(folder, 6.0, 1.5, 2.0)
+    Image.fromarray(vol[0][:100]).save(os.path.join(folder, "scan_99.png"))
+    code, log = run(["oct3d.py", "--scan", folder, "--out", os.path.join(tmp, "oct_bad")])
+    check("oct3d: a folder of B-scans is read in numeric order with the given size; mixed sizes refused",
+          np.array_equal(read, vol[:12]) and sp["assumed"] and abs(sp["dy"] - 125) < 1e-6
+          and code != 0 and "different sizes" in log)
+    # Heidelberg .vol: write a small file in the published layout and read it back.
+    n, z, x, hdr = 3, 40, 32, 512
+    head = bytearray(2048)
+    head[:12] = b"HSF-OCT-103\0"
+    struct.pack_into("<iiidddii", head, 12, x, n, z, 0.0115, 0.12, 0.0039, 8, 8)
+    struct.pack_into("<i", head, 100, hdr)
+    data = rng.random((n, z, x)).astype("<f4")
+    lines = np.stack([np.full((n, x), 10.0), np.full((n, x), 30.0)], axis=1).astype("<f4")   # device ILM, Bruch's
+    blob = bytes(head) + bytes(64)
+    for b in range(n):
+        bh = bytearray(hdr)
+        struct.pack_into("<ii", bh, 48, 2, 64)
+        bh[64:64 + 2 * x * 4] = lines[b].tobytes()
+        blob += bytes(bh) + data[b].tobytes()
+    vol_path = os.path.join(tmp, "eye.vol")
+    open(vol_path, "wb").write(blob)
+    read, sp, device = load_volume(vol_path)
+    check("oct3d: a .vol file in the published layout reads back (sizes, spacing in um, picture, device lines)",
+          read.shape == (n, z, x) and abs(sp["dx"] - 11.5) < 1e-3 and abs(sp["dz"] - 3.9) < 1e-3 and not sp["assumed"]
+          and np.array_equal(read, (data ** 0.25 * 255).astype(np.uint8))
+          and device is not None and np.allclose(device[0], 10) and np.allclose(device[1], 30))
+    out = os.path.join(tmp, "oct_demo")
+    code, log = run(["oct3d.py", "--demo", "--out", out])
+    page = open(os.path.join(out, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
+    again, _ = run(["oct3d.py", "--demo", "--out", out])
+    check("oct3d.py --demo writes the page, layers.npz and summary.json; refuses to overwrite",
+          code == 0 and "/*OCT_DATA*/" not in page and '"ilm_um"' in page
+          and os.path.exists(os.path.join(out, "layers.npz"))
+          and len(json.load(open(os.path.join(out, "summary.json")))["findings"]) == 1 and again != 0)
+
+    # Photo + scan: register.py against a pair whose true alignment is known.
+    import register as reg
+    from oct3d import synthetic_pair
+    image = rng.random((40, 50)).astype(np.float32)
+    template = rng.random((9, 12)).astype(np.float32)
+    scores = reg.ncc_map(image, np.fft.rfft2(image), template)
+    direct = [np.corrcoef(image[y:y + 9, x:x + 12].ravel(), template.ravel())[0, 1] for y, x in ((0, 0), (7, 21), (31, 38))]
+    check("register: FFT cross-correlation = the correlation computed window by window",
+          scores.shape == (32, 39) and np.allclose([scores[0, 0], scores[7, 21], scores[31, 38]], direct, atol=1e-4))
+    vol, spacing, _, _, photo, heat, true_matrix = synthetic_pair()
+    ilm, low = find_layers(vol, spacing)
+    oct_map = reg.oct_vessel_map(reg.oct_shadow_picture(vol, low, spacing))
+    found = reg.register(photo, oct_map, 6.0)
+    corners = [(0, 0), (1, 0), (1, 1), (0, 1), (0.5, 0.5)]
+    off = max(np.hypot(*(np.array(reg.scan_to_photo(found["matrix"], u, v)) - np.array(reg.scan_to_photo(true_matrix, u, v))))
+              for u, v in corners) * photo.shape[0]
+    check("register: the scan is placed in the photo within 2 pixels of the truth (size, 6 degree turn, shift) and trusted",
+          off < 2 and found["trusted"], f"largest error {off:.2f} px of {photo.shape[0]}, fit {found['ncc']:.2f}, "
+                                        f"control {found['control']:.2f}")
+    other = reg.register(synthetic_pair(tree_photo=1)[4], oct_map, 6.0)
+    check("register: a photo with another vessel pattern is NOT trusted",
+          not other["trusted"], f"fit {other['ncc']:.2f}, control {other['control']:.2f}")
+    # Carried-over heat lands on the swollen area (1.5 mm right, 1 mm toward the first scan = u 0.75, v 0.333).
+    on_scan = reg.warp_to_scan(heat, found["matrix"], 256)
+    py, px = np.unravel_index(on_scan.argmax(), on_scan.shape)
+    same = reg.warp_to_scan(heat, [[1, 0, 0], [0, 1, 0]], heat.shape[0])
+    check("register: warping with 'no change' returns the picture; the heat blob lands where it was drawn on the scan",
+          np.allclose(same, heat, atol=1) and abs(px / 256 - 0.75) < 0.02 and abs(py / 256 - 0.3333) < 0.02)
+    fused = json.load(open(os.path.join(out, "summary.json"))).get("fusion", {})
+    spot = (fused.get("hot_spots") or [{}])[0]
+    check("oct3d.py --demo fuses: photo lined up and trusted, model hot spot A sits on the thickened retina",
+          fused.get("registration", {}).get("trusted") is True and '"photo_on_scan"' in page
+          and spot.get("thickness_um", 0) > 400 and abs(spot.get("x_mm", 0) - 1.5) < 0.15)
+    # Eyeball shape: the page needs the WHOLE photo and heat (they are wrapped onto the back wall around the
+    # measured patch) and the shape switch. The curving itself happens in the page (WebGL), so it is checked by
+    # eye in a browser, not here.
+    check("oct3d.py --demo page carries the whole photo + heat for the eyeball's back wall, the shape switch, "
+          "the cut-open eye's switches (cut, part names) and the 1x-5x relief slider",
+          '"photo_full"' in page and '"heat_full"' in page and 'id="shape"' in page and "uCurved" in page
+          and 'id="cutOpen"' in page and 'id="labelsOn"' in page and 'id="stretch" type="range" min="1" max="5"' in page)
+    # The default shape is "Scan only": nothing drawn, only the photo and the OCT on a curved shell. The page must
+    # offer it first, keep the guessed photo relief behind its own switch (unticked = off) and carry the lighting switch.
+    check("oct3d.py --demo page opens on the scan-only shape, with the guessed relief switched off and labelled",
+          '<select id="shape"><option value="2">Scan only' in page
+          and '<input id="estRelief" type="checkbox"><span class="tag">estimated</span>' in page
+          and '<input id="shade" type="checkbox">' in page and "uScanOnly" in page)
+    # A real-style call with files: scan folder + photo of ANOTHER eye must be refused; --heat needs --photo.
+    scan_dir = os.path.join(tmp, "oct_pair")
+    os.makedirs(scan_dir)
+    for i in range(len(vol)):
+        Image.fromarray(vol[i]).save(os.path.join(scan_dir, f"{i:03d}.png"))
+    wrong = os.path.join(tmp, "wrong_photo.png")
+    Image.fromarray(synthetic_pair(tree_photo=1)[4]).save(wrong)
+    right = os.path.join(tmp, "right_photo.png")
+    Image.fromarray(photo).save(right)
+    heat_png = os.path.join(tmp, "heat.png")
+    Image.fromarray(heat).save(heat_png)
+    base = ["oct3d.py", "--scan", scan_dir, "--depth-mm", "2.0"]
+    code_wrong, log_wrong = run(base + ["--out", os.path.join(tmp, "fuse_wrong"), "--photo", wrong])
+    code_heat, log_heat = run(base + ["--out", os.path.join(tmp, "fuse_heat"), "--heat", heat_png])
+    code_ok, log_ok = run(base + ["--out", os.path.join(tmp, "fuse_ok"), "--photo", right, "--heat", heat_png])
+    if code_ok != 0:
+        print(log_ok[-2000:])
+    check("oct3d.py --photo/--heat from files: the right photo fuses, another eye's photo is refused, heat alone refused",
+          code_ok == 0 and "TRUSTED" in log_ok and "model hot spot A" in log_ok
+          and code_wrong != 0 and "do not clearly match" in log_wrong
+          and not os.path.exists(os.path.join(tmp, "fuse_wrong", "viewer.html"))
+          and code_heat != 0 and "--heat needs --photo" in log_heat)
+
+
+def test_photo2oct(tmp):
+    """photo2oct.py: the atlas, the landmark finder, the network + training on cartoon pairs, and the ESTIMATED page."""
+    import torch
+    from PIL import Image
+    import photo2oct as p2o
+    import register as reg
+    from oct3d import synthetic_pair
+    atlas = p2o.atlas_thickness(64, "left")
+    c = (np.arange(64) + 0.5) / 64 * 6 - 3
+    r = np.hypot(*np.meshgrid(c, c))
+    check("photo2oct: the atlas has a pit at the fovea, a thicker ring ~1 mm out, is thicker toward the disc, and mirrors",
+          atlas[r < 0.2].mean() < 245 and 330 < atlas[(r > 0.9) & (r < 1.1)].mean() < 350
+          and atlas[:, :8].mean() > atlas[:, -8:].mean() + 10
+          and np.allclose(p2o.atlas_thickness(64, "right"), atlas[:, ::-1]))
+    # A cartoon photo with a bright disc; a dark fovea is painted where the cartoon scan's centre lies.
+    _, _, _, _, photo, _, true_matrix = synthetic_pair()
+    fx, fy = reg.scan_to_photo(true_matrix, 0.5, 0.5)
+    size = photo.shape[0]
+    yy, xx = np.mgrid[:size, :size]
+    spot = np.exp(-((xx - fx * size) ** 2 + (yy - fy * size) ** 2) / (2 * (0.035 * size) ** 2))[..., None]
+    photo = (photo * (1 - 0.4 * spot)).astype(np.uint8)
+    disc, fovea, contrast = p2o.find_landmarks(photo)
+    width_mm, nasal, matrix = p2o.placement(disc, fovea)
+    u, v = reg.scan_to_photo(matrix, 0.5, 0.5)
+    check("photo2oct: disc and fovea found where they were drawn; the 6 mm square is centred on the fovea",
+          abs(fovea[0] - fx) < 0.03 and abs(fovea[1] - fy) < 0.03 and disc[0] < 0.3 and nasal == "left" and contrast > 4
+          and abs(u - fovea[0]) < 1e-6 and abs(v - fovea[1]) < 1e-6 and abs(matrix[0][0] - 6 / width_mm) < 1e-9,
+          f"fovea {fovea[0]:.2f}, {fovea[1]:.2f} (drawn {fx:.2f}, {fy:.2f})")
+    # Points of interest: the cartoon photo has dark and yellow spots drawn at one place; vessels must not be marked.
+    lx, ly = reg.scan_to_photo(true_matrix, 0.75, 1 / 3)             # 1.5 mm right, 1 mm toward the first scan
+    spot_heat, spots = p2o.photo_spots(photo, disc, fovea)
+    clean = np.full((256, 256, 3), 0, np.uint8)
+    clean[np.hypot(*(np.mgrid[:256, :256] - 127.5)) < 120] = (200, 105, 60)
+    check("photo2oct: the spot filter marks the drawn spots (and only there), nothing on a plain eye",
+          len(spots) >= 2 and all(np.hypot(f["x"] - lx, f["y"] - ly) < 0.12 for f in spots) and spot_heat.max() == 255
+          and p2o.photo_spots(clean, (0.2, 0.5), (0.5, 0.5))[1] == [],
+          f"{len(spots)} spots, drawn at {lx:.2f}, {ly:.2f}")
+    net = p2o.build_net().eval()
+    with torch.no_grad():
+        first = net(torch.randn(2, 3, 128, 128))
+    weights = sum(q.numel() for q in net.parameters())
+    check("photo2oct: an untrained ThicknessNet answers exactly the atlas (correction 0), 64 x 64, ~120k weights",
+          first.shape == (2, 1, 64, 64) and float(first.abs().max()) == 0 and 80_000 < weights < 200_000, f"{weights:,} weights")
+    # Cartoon pairs: thicker where spots were drawn. The trained network must find that; the atlas cannot.
+    pairs, out = os.path.join(tmp, "p2o_pairs"), os.path.join(tmp, "p2o_net")
+    code, log = run(["photo2oct.py", "synthetic-pairs", "--out", pairs, "--eyes", "200"])
+    code2, log2 = run(["photo2oct.py", "train", "--pairs", pairs, "--out", out, "--epochs", "25"])
+    res = json.load(open(os.path.join(out, "results.json"))) if code2 == 0 else {}
+    again, _ = run(["photo2oct.py", "train", "--pairs", pairs, "--out", out, "--epochs", "1"])
+    _, _, patients = p2o.load_pairs(pairs) if code == 0 else (0, 0, [])
+    tr, va, te = p2o.split_patients(patients) if patients else (np.zeros(1, bool),) * 3
+    p = np.array(patients)
+    check("photo2oct train (cartoon pairs): split by patient; on held-out patients the network beats the atlas and the "
+          "mean map, and cuts the error of the thickest point by over 40%; refuses to train into the same folder twice",
+          code == 0 and code2 == 0 and again != 0 and not (set(p[tr]) & set(p[va]) | set(p[tr]) & set(p[te]) | set(p[va]) & set(p[te]))
+          and res["test_mae_um"] < 0.96 * min(res["test_mae_atlas_um"], res["test_mae_mean_map_um"])
+          and res["test_peak_error_um"] < 0.6 * res["test_peak_error_atlas_um"],
+          (f"error {res['test_mae_um']:.1f} um vs atlas {res['test_mae_atlas_um']:.1f}; thickest point off by "
+           f"{res['test_peak_error_um']:.0f} um vs {res['test_peak_error_atlas_um']:.0f}") if res else (log + log2)[-300:])
+    # The page: atlas and network estimates of the cartoon photo, both marked ESTIMATED.
+    photo_path = os.path.join(tmp, "p2o_photo.png")
+    Image.fromarray(photo).save(photo_path)
+    est = os.path.join(tmp, "p2o_est")
+    code, log = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est, "--page"])
+    again, _ = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est, "--page"])
+    code3, log3 = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est + "_net", "--model", os.path.join(out, "model.pt"),
+                       "--no-caption"])
+    # The default output is ONE picture: the estimated B-scan, labelled; no page unless --page.
+    pic = Image.open(os.path.join(est, "oct.png")) if code == 0 else None
+    bare = Image.open(os.path.join(est + "_net", "oct.png")) if code3 == 0 else None
+    check("photo2oct estimate: the output is one grey OCT picture (768 x 512 + a caption line; --no-caption: none), marked "
+          "as an estimate inside the file; the 3D page is written only with --page",
+          pic is not None and bare is not None and pic.mode == "L" and pic.size == (768, 534) and bare.size == (768, 512)
+          and "ESTIMATED" in pic.info.get("Description", "") and "ESTIMATED" in bare.info.get("Description", "")
+          and not os.path.exists(os.path.join(est + "_net", "viewer.html"))
+          and np.asarray(bare)[:100].mean() < 40 < np.asarray(bare)[250:320].mean())
+    page = open(os.path.join(est, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
+    info = json.load(open(os.path.join(est, "estimate.json"))) if code == 0 else {}
+    check("photo2oct estimate: writes the page marked ESTIMATED (banner code, 'estimate' data, no heat), the map and "
+          "landmarks.png; the atlas map is the atlas; the network version runs; refuses to overwrite",
+          code == 0 and again != 0 and code3 == 0 and '"estimate": {"method": "atlas"' in page and 'id="estBanner"' in page
+          and "Nothing on this page was measured" in page and info.get("method") == "atlas"
+          and np.allclose(np.load(os.path.join(est, "thickness_um.npy")), p2o.atlas_thickness(64, info["nasal"]))
+          and os.path.exists(os.path.join(est, "landmarks.png"))
+          and json.load(open(os.path.join(est + "_net", "estimate.json")))["method"] == "network", (log + log3)[-300:])
+    points = info.get("points_of_interest", [])
+    check("photo2oct estimate: point of interest A sits on the drawn spots, with the estimated thickness under it; "
+          "the atlas alone reports no thickening",
+          len(points) >= 1 and points[0]["id"] == "A" and 200 < points[0]["thickness_um"] < 400
+          and '"heat_on_scan"' in page and info.get("thickened_vs_average") == [])
 
 
 def test_vit():
@@ -649,9 +938,12 @@ def test_vit():
 def main():
     test_threshold()
     test_vit()
+    test_eye3d()
     test_ordinal_loss()
     with tempfile.TemporaryDirectory() as tmp:
         test_saving(tmp)
+        test_oct3d(tmp)
+        test_photo2oct(tmp)
         test_end_to_end(tmp)
     print()
     if failures:

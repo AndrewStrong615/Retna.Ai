@@ -140,6 +140,99 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `heatmap.py`: Grad-CAM written from scratch: for a finished run, colors where the model found evidence of
   disease on validation eyes (missed, false alarms, caught, cleared; refuses test images). Writes
   `<run>/heatmaps/*.png`. Each map is scaled to its own peak; the label's `peak` compares strength across eyes.
+- `eye3d.py` + `eye3d_viewer.html` (3D eye view; checked on synthetic eyes only, not yet run on a real model):
+  for a finished run, writes ONE web page `<run>/eye3d/viewer.html` (no internet, no library: hand-written WebGL) in
+  which each chosen validation eye (same choice rules as heatmap.py; refuses test images) is an eyeball you can turn:
+  the photo on the inside back wall, evidence in shades of red, numbered findings, click a spot to probe it.
+  Heat = heatmap.py's Grad-CAM (region, 32 px cells) x LayerCAM from stage 2 (detail, 8 px cells; `--fine-stage 0` =
+  plain Grad-CAM). Vessel sketch and "looks like" (on a vessel-like line / darker / brighter spot) are classical
+  hand-written filters, NOT trained models, and describe pixels, not diagnoses. The 3D is a PROJECTION: one photo has
+  no depth; the page assumes a round eye and that the photo covers `--cap-deg` 36 around the back pole (an assumption,
+  adjustable in the page). Real depth would need OCT. The page embeds the photos: never commit it. Also writes
+  `findings.json` (the same numbers as a table).
+- `oct3d.py` + `oct3d_viewer.html` (TRUE 3D from OCT; checked on a synthetic volume only, no real scan yet): reads
+  an OCT volume (folder of B-scan pictures, `.npy` [scan, depth, width], or Heidelberg `.vol`: parser written from
+  the published layout, not yet tried on a real file; `.e2e`/DICOM not read), finds two surfaces per B-scan (ILM and
+  the top of the photoreceptor/RPE band: the two strongest dark-to-bright edges, each as the best left-to-right path
+  by hand-written dynamic programming, after Chiu et al. 2010; nothing learned), thickness map in um, thickened
+  areas as numbered findings (default: above median + max(2.5 robust SD, 50 um) of THIS scan; no normal-eye
+  database), and writes `<out>/viewer.html`: the measured surface as a 3D shape, red where thick, a B-scan sliding
+  through the volume, click to measure; plus `layers.npz`, `summary.json`. `--demo` = built-in synthetic volume (known
+  answer: surfaces within ~3 um). Pixel size comes from the .vol, else from `--width-mm/--length-mm/--depth-mm`
+  (marked "assumed"). A .vol's own device surfaces are compared with ours (free check). The disease model reads
+  fundus photos only: model heat reaches this page only through a registered photo (`--photo/--heat`, see
+  register.py); an OCT model trained from scratch does not exist yet. Planned real data: OLIVES (Prabhushankar et al. 2022, Zenodo 7105232: DR/DME eyes, OCT volumes + near-IR
+  fundus; check its licence before use; kept in `retina-data\olives`, never in the repo). Never commit scans or pages.
+- `register.py` (photo + OCT fusion; checked on a synthetic pair only): lines a fundus photo up with an OCT volume by
+  the vessels: photo vessel map (darker than surroundings, green channel) vs the OCT's vessel SHADOWS (mean of the
+  bright band below the lower surface, seen from above); search over size (0.6-1.6x of `--photo-width-mm` 13) and
+  turn (+-16 degrees, then fine), every shift at once by hand-written FFT normalized cross-correlation. Similarity
+  transform only (no mirror, no bending). Built-in control: the same search with the scan's map upside down and
+  transposed gives the chance level; TRUSTED only if fit >= 1.4x control and >= 0.25. Synthetic pair: under 1 px off,
+  a photo with another vessel tree rejected. `oct3d.py --photo P [--heat H]` then lays the photo and the model's heat
+  onto the measured surface (page: "Surface shows" / "Red shows", alignment check picture, model hot spots A, B..
+  with the retina thickness under each); refuses an untrusted match unless `--force-fusion`. The heat is computed on
+  the flat photo (`eye3d.py` now writes `<run>/eye3d/heat/<name>.png`); photo and heat must be the same preprocessed
+  frame. `oct3d.py --demo` shows the fused cartoon pair (its heat is DRAWN, not from a model).
+  Page shapes (switch under Display), three: "Scan only" (default since the scan-only rebuild) = NOTHING drawn: the
+  whole photo in its own pixel colours (no tint, no lighting unless "Light the relief" is ticked) on a curved shell of
+  radius 11 mm (the retina inside a 24 mm eye: 24 mm is the diameter), the OCT square raised by the MEASURED thickness
+  x the relief slider, the OCT's own B-scan pixels on the square's four cut edges (first/last B-scan and the first/last
+  column of every B-scan), a grey rim for the photo's edge and a 1 mm grid. "Surface shows": true photo colours / OCT
+  seen from above (grey) / OCT depth in grey (thick = bright). Still ASSUMED: the curve itself, where the square sits
+  on it, and all height OUTSIDE the square (the photo has no depth: it lies at the scan's median thickness). "Guess
+  relief from photo" (off by default, tagged "estimated") raises dark vessels (<= 0.05 mm) and lowers the bright disc
+  (<= 0.25 mm) from photo BRIGHTNESS: a guess for looking, never a measurement; a real disc cup or foveal pit shows
+  only where an OCT scan covers it. "Textbook eye" (kept as an option) = a textbook-style cutaway of a STANDARD 24 mm eye, all
+  hand-written WebGL (no three.js): the top-front quarter is cut away (y > 0 and z > -1.5 mm; "Cut the eye open"), the
+  cut faces show sclera (white), choroid (dark red), retina (peach); cornea, anterior chamber, iris with pupil, pleated
+  ciliary body, zonular fibres, lens, four rectus muscle stubs, optic nerve with central artery and vein. ALL of that is
+  a DRAWING (coats drawn thicker than life), the same for every scan. The whole registered photo and the OCT patch are
+  curved onto the inner back wall: a point l mm from the patch centre sits at angle l/11 from the back pole (11 mm =
+  radius of the retina's back surface; distances along the wall kept), the lower surface lies ON the wall and the inner
+  surface rises by the MEASURED thickness x the relief slider (1x anatomical to 5x; buttons for both ends); the drawn
+  retina around the patch gets this scan's median thickness x the same relief, so the patch sits flush; the scan's own
+  tilt is dropped. Assumed: eye size, the patch centred on the back pole, the nerve's side (chosen in the page).
+  Part names with leader lines (two columns, pushed apart so they never overlap; hidden when the wall is in the way;
+  "Hide names"). Buttons: Full cutaway / Zoom to OCT patch / Front view / Section from above. "Flat block" = exactly as
+  scanned. All of this runs in the page (WebGL), looked at in a browser on the demo; selftest checks only the page's
+  data and switches. Real data caveat:
+  OLIVES pairs OCT with NEAR-INFRARED fundus pictures (as recalled; verify on download), not the colour photos the
+  model was trained on: fine for testing registration, out of domain for the model's heat.
+- `photo2oct.py` (photo -> ROUGH ESTIMATE of the macular OCT; real photos: only the atlas, on one internet photo):
+  a photo holds no depth, so this guesses. Two guessers. (1) ATLAS (works now, nothing trained): finds the optic disc
+  (brightest blob) and the fovea (darkest smooth spot beside it) with classical filters and lays the thickness map of
+  an AVERAGE HEALTHY eye (pit 225 um, ring ~345 um at 1 mm, thicker toward the disc; approximate published Spectralis
+  averages typed in from memory, verify against Grover et al. 2010 before quoting) on a 6 x 6 mm square at the fovea.
+  The photo decides only WHERE the map goes; it is the same map for every eye and can never show swelling.
+  (2) `ThicknessNet` (hand-written U-Net, 118,593 weights, random start, last layer zero so untrained = the atlas):
+  predicts the DIFFERENCE from the atlas from the 128 px macula crop (mirrored so the disc is on the left), 64 x 64,
+  L1 loss. Needs PAIRS (photo + real OCT of the same eye): none exist here yet. Checked on cartoon pairs only
+  (`synthetic-pairs`: thicker where spots are drawn, plus a +-15 um offset nothing in the picture reveals): held-out
+  error ~13-14 um vs atlas ~16-17, thickest point off by ~45 um vs ~104. A cartoon-trained network says NOTHING about
+  a real photo. `train --pairs D --out R`: split by PATIENT 70/15/15, best epoch on validation, test patients scored
+  once against two no-network yardsticks (atlas, mean training map). `make-pair --oct <oct3d.py --photo folder> --photo
+  P --patient ID --nasal left|right --pairs D`: one real pair (needs a TRUSTED registration and a ~6 x 6 mm scan).
+  `estimate --photo P --out D [--model M] [--disc x y --fovea x y]`: THE OUTPUT is one picture, `D\oct.png`: the
+  estimated B-scan through the fovea (grey, 768 x 512, drawn from the estimated thickness), with a thin line
+  "ESTIMATED ... not a scan" under it (`--no-caption` removes the line; the words always stay in the PNG's text
+  fields), plus estimate.json and thickness_um.npy. Only with `--page`: landmarks.png (check it) and the oct3d page
+  with `estimate` data: a banner "ESTIMATED from a photo", all "measured" texts
+  replaced; its B-scans are DRAWN from the estimate (layers at fixed fractions, shadows under the photo's vessels).
+  POINTS OF INTEREST on the estimate (yellow letters A, B.., each with the ESTIMATED thickness under it): from
+  `--heat` (the disease model's heat picture from eye3d.py) or, without it, `photo_spots`: a classical filter for small
+  compact spots that stand out in the green channel (>= 8 robust SDs; vessels dropped as long and thin; disc, rim and
+  the fovea's own dark spot left out). The 8 was set on ONE healthy photo (its strongest ordinary structure: 7) and on
+  cartoon spots (10-14): never tried on a real diseased photo; a hint where to look, not a finding. "Thickened" on an
+  estimate page = more than 50 um above the ATLAS at that place (so the atlas alone never reports one).
+  Assumed: disc-fovea 4.5 mm (sets every mm), flat eye wall. First real photo tried: scikit-image's sample retina
+  (Wikimedia Commons "Fundus photograph of normal left eye", Haggstrom, CC0): landmarks right, atlas centre 275 um.
+  Real pairs, licences checked 2026-11-25: OLIVES (Zenodo 7105232, CC BY 4.0, 33.9 GB, 96 DR/DME eyes, 1,268 NEAR-INFRARED
+  fundus pictures each with 49 B-scans: best first training set, but not colour photos); GAMMA (300 COLOUR photo + OCT
+  pairs, 3 x 3 mm scans, glaucoma, CC BY-NC-ND, official host gamma.grand-challenge.org; Hugging Face copies are third
+  party); Harvard FairVision (30,000 SLO + OCT, CC BY-NC-ND, non-commercial research only, ~600 GB); MultiEYE is
+  UNPAIRED. Published yardstick: Holmberg et al. 2020, ~97,000 infrared pairs, mean error 33 um (50-61 um on thick
+  retinas). Never commit pairs, real photos or pages.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are

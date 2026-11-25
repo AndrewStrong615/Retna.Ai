@@ -1,0 +1,519 @@
+<!doctype html>
+<!--
+  3D eye viewer: the page that eye3d.py fills in (it replaces the EYE_DATA marker
+  below with the photos, heat maps and findings). Everything is in this one file
+  and hand-written: no three.js, no internet needed. The 3D drawing uses WebGL,
+  the browser's built-in way to talk to the graphics card.
+
+  How the picture is made, in short:
+    1. GEOMETRY. The eyeball is a sphere of radius 1 around (0, 0, 0). The front
+       (cornea, pupil) points to +z, the back wall to -z. A point of the photo at
+       distance r from the photo's centre (r = 1 at the photo's edge) is placed
+       on the back wall at an angle  theta = r * cap  from the back pole, in the
+       same direction as in the photo. "cap" is an ASSUMPTION (how much of the
+       retina the camera saw), not something measured from the photo.
+    2. COLOUR. For every pixel of the 3D surface the graphics card looks up the
+       photo, the heat map and the vessel sketch at that point and mixes them.
+    3. CAMERA. You orbit a point; a click sends a ray from the camera through
+       the clicked pixel, finds where it meets the sphere, and turns that back
+       into a photo position, which is how the page knows what you clicked.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D eye view</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171b22; --line:#2a303b; --text:#e6e9ee; --dim:#9aa3b2; --red:#ff4d3d; --accent:#6cc5ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+               font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display:flex; height:100%; }
+  #stage { position:relative; flex:1; min-width:0; }
+  canvas { display:block; width:100%; height:100%; cursor:grab; touch-action:none; }
+  canvas.drag { cursor:grabbing; }
+  #side { width:360px; max-width:100%; background:var(--panel); border-left:1px solid var(--line);
+          overflow-y:auto; padding:14px 16px 24px; }
+  h1 { font-size:16px; margin:0 0 2px; }
+  h2 { font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); margin:18px 0 6px; }
+  select, button { font:inherit; color:var(--text); background:#222833; border:1px solid var(--line);
+                   border-radius:6px; padding:6px 8px; }
+  select { width:100%; }
+  button { cursor:pointer; } button:hover { border-color:var(--accent); }
+  .row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .row label { flex:0 0 132px; color:var(--dim); }
+  .row input[type=range] { flex:1; min-width:0; }
+  .row output { flex:0 0 40px; text-align:right; font-variant-numeric:tabular-nums; }
+  .facts { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin:8px 0 0; }
+  .facts dt { color:var(--dim); } .facts dd { margin:0; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:10px; font-size:12px; border:1px solid var(--line); }
+  .tag.bad { color:#ffb3aa; border-color:#7a2d26; } .tag.good { color:#a8e6b4; border-color:#2d6a3a; }
+  .finding { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 0; cursor:pointer; }
+  .finding:hover { border-color:var(--accent); }
+  .finding.sel { border-color:var(--red); background:#241a1b; }
+  .finding b { color:var(--red); }
+  .finding small { color:var(--dim); display:block; }
+  .note { color:var(--dim); font-size:12.5px; border-left:3px solid var(--line); padding-left:10px; margin:8px 0; }
+  .note strong { color:var(--text); }
+  #probe { min-height:3.2em; }
+  .pin { position:absolute; transform:translate(-50%,-50%); width:22px; height:22px; border-radius:50%;
+         background:rgba(20,20,24,.85); border:2px solid var(--red); color:#fff; font-size:12px; font-weight:600;
+         display:flex; align-items:center; justify-content:center; cursor:pointer; user-select:none; }
+  .pin.sel { background:var(--red); border-color:#fff; }
+  #views { position:absolute; left:12px; top:12px; display:flex; gap:6px; flex-wrap:wrap; }
+  #hint { position:absolute; left:12px; bottom:10px; color:var(--dim); font-size:12px; pointer-events:none; }
+  #legend { position:absolute; right:12px; bottom:10px; font-size:12px; color:var(--dim); text-align:right; pointer-events:none; }
+  #legend i { display:block; width:160px; height:10px; border-radius:5px; margin:3px 0 0 auto; }
+  @media (max-width: 760px) { #app { flex-direction:column; } #side { width:100%; height:48%; border-left:0; border-top:1px solid var(--line); }
+                              #stage { height:52%; flex:none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <div id="pins"></div>
+    <div id="views">
+      <button data-view="three">3/4 view</button>
+      <button data-view="pupil">Through the pupil</button>
+      <button data-view="side">Side</button>
+      <button data-view="inside">Close-up from inside</button>
+    </div>
+    <div id="hint">Drag to turn · wheel or pinch to zoom · click the retina to probe a spot</div>
+    <div id="legend"><span id="legendText"></span><i id="legendBar"></i></div>
+  </div>
+  <div id="side">
+    <h1>3D eye view</h1>
+    <div style="color:var(--dim)" id="runline"></div>
+    <h2>Eye</h2>
+    <select id="eyeSelect"></select>
+    <dl class="facts" id="facts"></dl>
+
+    <h2>Findings (hottest regions)</h2>
+    <div id="findings"></div>
+
+    <h2>Clicked spot</h2>
+    <div id="probe" class="note">Click anywhere on the retina.</div>
+
+    <h2>Display</h2>
+    <div class="row"><label for="map">Heat map</label>
+      <select id="map"><option value="heat">Sharpened (region x detail)</option><option value="coarse">Grad-CAM only (as heatmap.py)</option></select></div>
+    <div class="row"><label for="colors">Colours</label>
+      <select id="colors"><option value="0">Shades of red</option><option value="1">Rainbow (as heatmap.py)</option></select></div>
+    <div class="row"><label for="vessels">Vessel sketch</label>
+      <select id="vessels"><option value="0">Hidden</option><option value="1">Outlined in blue</option><option value="2">Heat on vessels only</option></select></div>
+    <div class="row"><label for="opacity">Heat strength</label><input id="opacity" type="range" min="0" max="1" step="0.01" value="0.8"><output></output></div>
+    <div class="row"><label for="thr">Hide heat below</label><input id="thr" type="range" min="0" max="0.95" step="0.01" value="0.2"><output></output></div>
+    <div class="row"><label for="relief">Raise the hot spots</label><input id="relief" type="range" min="0" max="0.25" step="0.005" value="0.06"><output></output></div>
+    <div class="row"><label for="cap">Photo covers (deg)</label><input id="cap" type="range" min="20" max="70" step="1" value="36"><output></output></div>
+    <div class="row"><label for="gray">Photo in gray</label><input id="gray" type="checkbox" checked></div>
+    <div class="row"><label for="pinsOn">Numbered pins</label><input id="pinsOn" type="checkbox" checked></div>
+
+    <h2>What this is, and is not</h2>
+    <div class="note"><strong>The 3D is a projection, not a scan.</strong> One fundus photo is flat and holds no depth.
+      The photo is wrapped onto the back wall of a standard round eyeball, assuming it covers the angle set above. Positions
+      across the retina are roughly right; the eye's real shape, swelling or thickness are not measured (that needs OCT).
+      "Raise the hot spots" only lifts red areas toward you so they are easier to find.</div>
+    <div class="note"><strong>Red = where the model found evidence for diabetic retinopathy</strong>, scaled to this eye's
+      own strongest spot (so every eye shows some red; "peak" says how strong it really was). It shows what the model
+      used, which is not proof that it is right. The model knows only diabetic retinopathy, no other disease.</div>
+    <div class="note"><strong>Sharpness.</strong> <span id="sharpness"></span></div>
+    <div class="note"><strong>Vessel sketch and "looks like"</strong> come from simple hand-written filters (thin dark lines;
+      darker or brighter than the surroundings), not from a trained model. They describe pixels. They are not a diagnosis.</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const DATA = /*EYE_DATA*/;
+const EYES = DATA.eyes, META = DATA.meta;
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- small vector / matrix helpers
+// Matrices are 4x4, stored column by column in a flat array of 16 numbers (WebGL's convention).
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => mul(a, 1 / (Math.hypot(a[0], a[1], a[2]) || 1));
+
+function perspective(fovY, aspect, near, far) {       // squeezes the visible pyramid into a cube
+  const f = 1 / Math.tan(fovY / 2), d = 1 / (near - far);
+  return [f / aspect, 0, 0, 0,  0, f, 0, 0,  0, 0, (far + near) * d, -1,  0, 0, 2 * far * near * d, 0];
+}
+function lookAt(eye, right, up, fwd) {                // moves the world so the camera sits at 0 looking down -z
+  return [right[0], up[0], -fwd[0], 0,  right[1], up[1], -fwd[1], 0,  right[2], up[2], -fwd[2], 0,
+          -dot(right, eye), -dot(up, eye), dot(fwd, eye), 1];
+}
+function matMul(a, b) {                               // a * b
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+  return o;
+}
+
+// ---------------------------------------------------------------- photo position <-> point on the eyeball
+// (px, py): position in the photo, centre = (0, 0), edge = distance 1, y up.
+function photoToSphere(px, py, capRad, shrink) {
+  const r = Math.hypot(px, py), th = r * capRad, s = r > 1e-9 ? Math.sin(th) / r : 0, k = shrink === undefined ? 1 : shrink;
+  return [px * s * k, py * s * k, -Math.cos(th) * k];
+}
+function sphereToPhoto(p, capRad) {                   // the reverse; null when the point is not on the photographed cap
+  const th = Math.acos(Math.max(-1, Math.min(1, -p[2]))), r = th / capRad;
+  if (r > 1) return null;
+  const s = Math.hypot(p[0], p[1]);
+  return s < 1e-9 ? [0, 0] : [p[0] / s * r, p[1] / s * r];
+}
+
+// ---------------------------------------------------------------- WebGL setup
+const canvas = $("gl");
+const gl = canvas.getContext("webgl", { antialias: true, alpha: false });
+if (!gl) { document.body.innerHTML = "<p style='padding:20px'>This browser cannot show WebGL (3D) content.</p>"; throw new Error("no webgl"); }
+
+function program(vsSource, fsSource) {
+  const make = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  const p = gl.createProgram();
+  gl.attachShader(p, make(gl.VERTEX_SHADER, vsSource)); gl.attachShader(p, make(gl.FRAGMENT_SHADER, fsSource));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+// The retina. The vertex shader runs once per mesh corner and places it on the sphere;
+// the fragment shader runs once per screen pixel and decides its colour.
+const retina = program(`
+  attribute vec2 aP;            // photo position of this corner (centre 0, edge 1)
+  attribute float aHeat;        // heat there (0..1), used only for "raise the hot spots"
+  uniform mat4 uMVP; uniform float uCap, uRelief;
+  varying vec2 vUV; varying float vR;
+  void main() {
+    float r = length(aP), th = r * uCap;
+    vec2 dir = r > 1e-6 ? aP / r : vec2(0.0);
+    vec3 pos = vec3(sin(th) * dir, -cos(th)) * (1.0 - uRelief * aHeat);   // toward the eye's centre = toward the viewer
+    vUV = vec2(aP.x * 0.5 + 0.5, 0.5 - aP.y * 0.5); vR = r;
+    gl_Position = uMVP * vec4(pos, 1.0);
+  }`, `
+  precision mediump float;
+  uniform sampler2D uPhoto, uHeat, uVessels;
+  uniform float uOpacity, uThr; uniform int uColors, uVesselMode; uniform bool uGray;
+  varying vec2 vUV; varying float vR;
+  vec3 rainbow(float h) {       // the same blue -> green -> yellow -> red scale as heatmap.py's colorize()
+    return clamp(vec3(1.5 - abs(4.0 * h - 3.0), 1.5 - abs(4.0 * h - 2.0), 1.5 - abs(4.0 * h - 1.0)), 0.0, 1.0);
+  }
+  void main() {
+    vec3 col = texture2D(uPhoto, vUV).rgb;
+    if (uGray) col = vec3(dot(col, vec3(0.299, 0.587, 0.114)));
+    float ves = texture2D(uVessels, vUV).r;
+    float h = texture2D(uHeat, vUV).r;
+    if (uVesselMode == 2) h *= ves;
+    if (uVesselMode == 1) col = mix(col, vec3(0.25, 0.75, 1.0), 0.6 * ves);
+    if (h > uThr) {
+      float t = (h - uThr) / (1.0 - uThr);                    // 0 at the threshold, 1 at the strongest spot
+      vec3 hot = uColors == 1 ? rainbow(h)
+               : (t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8)
+                          : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2));
+      col = mix(col, hot, uOpacity * (0.35 + 0.65 * t));
+    }
+    col *= 1.0 - 0.25 * smoothstep(0.92, 1.0, vR);            // soft dark rim at the photo's edge
+    if (!gl_FrontFacing) col *= 0.35;                         // seen from behind (through the eye's wall): dimmed
+    gl_FragColor = vec4(col, 1.0);
+  }`);
+
+// Plain coloured lines: the eyeball's wire frame, iris, pupil and the rings around findings.
+const lines = program(`
+  attribute vec3 aPos; uniform mat4 uMVP;
+  void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; uniform vec4 uColor;
+  void main() { gl_FragColor = uColor; }`);
+
+// The retina mesh: rings of points from the photo's centre to its edge, joined into triangles.
+const RINGS = 110, SEGS = 220;
+const meshP = new Float32Array((RINGS + 1) * SEGS * 2);
+for (let i = 0; i <= RINGS; i++) for (let j = 0; j < SEGS; j++) {
+  const r = i / RINGS, a = j / SEGS * 2 * Math.PI, k = (i * SEGS + j) * 2;
+  meshP[k] = r * Math.cos(a); meshP[k + 1] = r * Math.sin(a);
+}
+const meshIndex = new Uint16Array(RINGS * SEGS * 6);
+for (let i = 0, n = 0; i < RINGS; i++) for (let j = 0; j < SEGS; j++) {
+  const a = i * SEGS + j, b = i * SEGS + (j + 1) % SEGS, c = a + SEGS, d = b + SEGS;
+  meshIndex.set([a, c, b, b, c, d], n); n += 6;
+}
+const buf = (target, data, usage) => { const b = gl.createBuffer(); gl.bindBuffer(target, b); gl.bufferData(target, data, usage || gl.STATIC_DRAW); return b; };
+const bufP = buf(gl.ARRAY_BUFFER, meshP), bufIndex = buf(gl.ELEMENT_ARRAY_BUFFER, meshIndex);
+const bufHeat = buf(gl.ARRAY_BUFFER, new Float32Array((RINGS + 1) * SEGS), gl.DYNAMIC_DRAW);
+const bufLines = gl.createBuffer();
+
+function circleOnSphere(centre, angle, radius, n) {   // points of a circle around `centre` (unit vector), `angle` wide
+  const helper = Math.abs(centre[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+  const u = norm(cross(centre, helper)), v = cross(centre, u), pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = i / n * 2 * Math.PI;
+    pts.push(mul(add(mul(centre, Math.cos(angle)), add(mul(u, Math.sin(angle) * Math.cos(a)), mul(v, Math.sin(angle) * Math.sin(a)))), radius));
+  }
+  return pts;
+}
+const loopToSegments = pts => pts.flatMap((p, i) => [...p, ...pts[(i + 1) % pts.length]]);
+
+// The eyeball's wire frame (fixed): circles of latitude and longitude, plus iris and pupil at the front.
+const globeLines = [], irisLines = [];
+for (let lat = 20; lat < 180; lat += 20) globeLines.push(...loopToSegments(circleOnSphere([0, 0, 1], lat * Math.PI / 180, 1.004, 72)));
+for (let lon = 0; lon < 180; lon += 20) {
+  const a = lon * Math.PI / 180;
+  globeLines.push(...loopToSegments(circleOnSphere([Math.cos(a), Math.sin(a), 0], Math.PI / 2, 1.004, 72)));
+}
+irisLines.push(...loopToSegments(circleOnSphere([0, 0, 1], 0.50, 1.0, 72)));    // iris edge
+irisLines.push(...loopToSegments(circleOnSphere([0, 0, 1], 0.17, 1.02, 48)));   // pupil
+
+// ---------------------------------------------------------------- state
+const state = { eye: null, sel: 0, yaw: 0.6, pitch: 0.22, dist: 3.9, target: [0, 0, -0.15], dirty: true };
+const tex = {};                 // WebGL textures of the current eye
+const pix = {};                 // the same pictures as readable pixels, for clicks and the mesh's heat
+const ui = {};
+for (const id of ["map", "colors", "vessels", "opacity", "thr", "relief", "cap", "gray", "pinsOn"]) ui[id] = $(id);
+const capRad = () => ui.cap.value * Math.PI / 180;
+const redraw = () => { state.dirty = true; };
+
+function loadImage(url) { return new Promise((ok, fail) => { const im = new Image(); im.onload = () => ok(im); im.onerror = fail; im.src = url; }); }
+function makeTexture(image) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  // Photos are not power-of-two sized: WebGL 1 then needs clamping and no mipmaps.
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return t;
+}
+function readPixels(image) {    // one byte per pixel (the red channel) of a gray picture
+  const c = document.createElement("canvas"); c.width = image.width; c.height = image.height;
+  const ctx = c.getContext("2d"); ctx.drawImage(image, 0, 0);
+  const rgba = ctx.getImageData(0, 0, c.width, c.height).data, out = new Uint8Array(c.width * c.height);
+  for (let i = 0; i < out.length; i++) out[i] = rgba[i * 4];
+  return { w: c.width, h: c.height, data: out };
+}
+function sample(p, px, py) {    // value at a photo position (nearest pixel)
+  const x = Math.min(p.w - 1, Math.max(0, Math.round((px * 0.5 + 0.5) * p.w - 0.5)));
+  const y = Math.min(p.h - 1, Math.max(0, Math.round((0.5 - py * 0.5) * p.h - 0.5)));
+  return p.data[y * p.w + x];
+}
+function currentHeat() { return ui.map.value === "coarse" ? pix.coarse : pix.heat; }
+function updateMeshHeat() {     // heat at every mesh corner, for "raise the hot spots"
+  const h = new Float32Array((RINGS + 1) * SEGS), p = currentHeat();
+  for (let k = 0; k < h.length; k++) h[k] = sample(p, meshP[k * 2], meshP[k * 2 + 1]) / 255;
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufHeat); gl.bufferData(gl.ARRAY_BUFFER, h, gl.DYNAMIC_DRAW);
+}
+
+async function showEye(index) {
+  const eye = EYES[index];
+  const names = ["photo", "heat", "coarse", "vessels", "labels"];
+  const images = await Promise.all(names.map(n => loadImage(eye[n])));
+  names.forEach((n, i) => { if (tex[n]) gl.deleteTexture(tex[n]); if (n !== "labels") tex[n] = makeTexture(images[i]); if (n !== "photo") pix[n] = readPixels(images[i]); });
+  state.eye = eye; state.sel = 0;
+  updateMeshHeat(); renderSide(); buildPins(); setView("three"); redraw();
+}
+
+// ---------------------------------------------------------------- side panel
+const fmt = (v, d) => Number(v).toFixed(d === undefined ? 0 : d);
+const GROUPS = { missed: "missed (sick, not referred)", false_alarm: "false alarm (healthy, referred)", caught: "caught (sick, referred)", cleared: "cleared (healthy, not referred)", chosen: "chosen" };
+function renderSide() {
+  const e = state.eye;
+  const right = e.sick === e.referred;
+  $("facts").innerHTML =
+    `<dt>True grade</dt><dd>${e.grade} of 0-4 (${e.sick ? "referable" : "not referable"})</dd>` +
+    `<dt>Model</dt><dd>score ${e.score >= 0 ? "+" : ""}${fmt(e.score, 2)} · <span class="tag ${right ? "good" : "bad"}">${e.referred ? "referred" : "not referred"}${right ? "" : " (wrong)"}</span></dd>` +
+    `<dt>Group</dt><dd>${GROUPS[e.group] || e.group}</dd>` +
+    `<dt>Peak evidence</dt><dd>${fmt(e.peak, 2)} <span style="color:var(--dim)">(compare between eyes)</span></dd>` +
+    `<dt>Heat outside eye</dt><dd>${fmt(e.heat_outside_eye_pct, 1)}%${e.heat_outside_eye_pct > 10 ? " <span class='tag bad'>high</span>" : ""}</dd>`;
+  const box = $("findings");
+  box.innerHTML = e.findings.length ? "" : "<div class='note'>No region reaches the threshold.</div>";
+  e.findings.forEach(f => {
+    const d = document.createElement("div");
+    d.className = "finding" + (f.id === state.sel ? " sel" : "");
+    d.innerHTML = `<b>#${f.id}</b> · ${f.clock} o'clock, ${fmt(f.from_centre_pct)}% of the way to the edge` +
+      `<small>${fmt(f.area_pct, 2)}% of the photo · heat ${fmt(f.peak * 100)}% at its strongest · ${fmt(f.on_vessel_pct)}% on vessel-like lines</small>` +
+      `<small>Pixels there look like: ${f.looks}</small>`;
+    d.onclick = () => selectFinding(f.id, true);
+    box.appendChild(d);
+  });
+  const fine = META.fine_stage ? `The sharpened map multiplies a region map (cells of ${META.coarse_cell_px} x ${META.coarse_cell_px} pixels) by a detail map from stage ${META.fine_stage} (cells of ${META.cell_px} x ${META.cell_px} pixels) on a ${e.size}-pixel photo. It can point at a spot or a stretch of vessel a few cells wide, not at a single tiny dot.`
+                               : `This run was exported with plain Grad-CAM only: one cell covers ${META.coarse_cell_px} x ${META.coarse_cell_px} pixels of a ${e.size}-pixel photo, so it shows regions, not spots.`;
+  $("sharpness").textContent = fine;
+}
+function selectFinding(id, fly) {
+  state.sel = state.sel === id && !fly ? 0 : id;
+  renderSide(); buildPins();
+  const f = state.eye.findings.find(f => f.id === state.sel);
+  if (f && fly) {               // camera just past the eye's centre, looking straight at the finding
+    const p = photoToSphere(f.x, f.y, capRad());
+    flyTo({ target: p, dist: 1.15, yaw: Math.atan2(-p[0], -p[2]), pitch: Math.asin(Math.max(-1, Math.min(1, -p[1]))) });
+  }
+  redraw();
+}
+
+// ---------------------------------------------------------------- pins (numbered labels drawn as HTML over the canvas)
+function buildPins() {
+  const box = $("pins"); box.innerHTML = "";
+  state.eye.findings.forEach(f => {
+    const d = document.createElement("div");
+    d.className = "pin" + (f.id === state.sel ? " sel" : ""); d.textContent = f.id; d.dataset.id = f.id;
+    d.onclick = () => selectFinding(f.id, true);
+    box.appendChild(d);
+  });
+}
+
+// ---------------------------------------------------------------- camera
+function camera() {
+  const cp = Math.cos(state.pitch), offset = [cp * Math.sin(state.yaw), Math.sin(state.pitch), cp * Math.cos(state.yaw)];
+  const eye = add(state.target, mul(offset, state.dist)), fwd = norm(sub(state.target, eye));
+  const right = norm(cross(fwd, [0, 1, 0])), up = cross(right, fwd);
+  const aspect = canvas.width / canvas.height, fov = 40 * Math.PI / 180;
+  const mvp = matMul(perspective(fov, aspect, 0.02, 20), lookAt(eye, right, up, fwd));
+  return { eye, fwd, right, up, aspect, fov, mvp };
+}
+const VIEWS = {
+  three:  { target: [0, 0, -0.15], dist: 3.9, yaw: 0.6, pitch: 0.22 },
+  pupil:  { target: [0, 0, -0.5], dist: 2.9, yaw: 0, pitch: 0 },
+  side:   { target: [0, 0, 0], dist: 3.6, yaw: Math.PI / 2 - 0.25, pitch: 0.12 },
+  inside: { target: [0, 0, -1], dist: 1.25, yaw: 0, pitch: 0 },
+};
+function setView(name) { Object.assign(state, JSON.parse(JSON.stringify(VIEWS[name]))); redraw(); }
+let flight = null;
+function flyTo(goal) {          // glide the camera to a new position over about half a second
+  const from = { target: state.target.slice(), dist: state.dist, yaw: state.yaw, pitch: state.pitch }, t0 = performance.now();
+  let dyaw = goal.yaw - from.yaw; dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));      // the short way round
+  flight = now => {
+    const t = Math.min(1, (now - t0) / 500), s = t * t * (3 - 2 * t);
+    state.target = add(from.target, mul(sub(goal.target, from.target), s));
+    state.dist = from.dist + (goal.dist - from.dist) * s; state.yaw = from.yaw + dyaw * s; state.pitch = from.pitch + (goal.pitch - from.pitch) * s;
+    if (t >= 1) flight = null;
+    redraw();
+  };
+}
+
+// ---------------------------------------------------------------- clicking: which point of the retina is under the mouse?
+function pick(clientX, clientY) {
+  const box = canvas.getBoundingClientRect(), cam = camera();
+  const nx = (clientX - box.left) / box.width * 2 - 1, ny = 1 - (clientY - box.top) / box.height * 2;
+  const k = Math.tan(cam.fov / 2);
+  const dir = norm(add(cam.fwd, add(mul(cam.right, nx * k * cam.aspect), mul(cam.up, ny * k))));
+  // Where does the ray  eye + t * dir  meet the unit sphere? Solve |eye + t dir|^2 = 1 for t.
+  const b = dot(cam.eye, dir), c = dot(cam.eye, cam.eye) - 1, disc = b * b - c;
+  if (disc < 0) return null;
+  for (const t of [-b - Math.sqrt(disc), -b + Math.sqrt(disc)]) {       // nearer meeting point first
+    if (t <= 0) continue;
+    const photo = sphereToPhoto(add(cam.eye, mul(dir, t)), capRad());
+    if (photo) return photo;
+  }
+  return null;
+}
+function probe(photo) {
+  const box = $("probe");
+  if (!photo) { box.textContent = "That is not on the photographed part of the retina."; return; }
+  const [px, py] = photo, h = sample(currentHeat(), px, py) / 255, v = sample(pix.vessels, px, py) > 127, id = sample(pix.labels, px, py);
+  const hour = Math.round(((Math.atan2(px, py) * 180 / Math.PI + 360) % 360) / 30) % 12 || 12;
+  box.innerHTML = `<strong>${hour} o'clock, ${fmt(Math.hypot(px, py) * 100)}% of the way to the edge.</strong><br>` +
+    `Heat here: ${fmt(h * 100)}% of this eye's strongest spot. ` +
+    `Vessel sketch: ${v ? "on a vessel-like line" : "not on a vessel-like line"}. ` +
+    (id ? `Part of finding #${id}.` : "Not part of a numbered finding.");
+  if (id && id !== state.sel) { state.sel = id; renderSide(); buildPins(); redraw(); }
+}
+
+// ---------------------------------------------------------------- mouse / touch
+const pointers = new Map(); let moved = 0, pinch = 0;
+canvas.addEventListener("pointerdown", e => { canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]); moved = 0; pinch = 0; canvas.classList.add("drag"); });
+canvas.addEventListener("pointermove", e => {
+  const last = pointers.get(e.pointerId); if (!last) return;
+  const dx = e.clientX - last[0], dy = e.clientY - last[1];
+  pointers.set(e.pointerId, [e.clientX, e.clientY]); moved += Math.abs(dx) + Math.abs(dy);
+  if (pointers.size === 2) {    // two fingers: zoom by the change in their distance
+    const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinch) state.dist = Math.min(8, Math.max(0.3, state.dist * pinch / d));
+    pinch = d;
+  } else { flight = null; state.yaw -= dx * 0.006; state.pitch = Math.max(-1.5, Math.min(1.5, state.pitch + dy * 0.006)); }
+  redraw();
+});
+const release = e => { if (pointers.delete(e.pointerId) && e.type === "pointerup" && moved < 5 && pointers.size === 0) probe(pick(e.clientX, e.clientY)); if (!pointers.size) canvas.classList.remove("drag"); };
+canvas.addEventListener("pointerup", release); canvas.addEventListener("pointercancel", release);
+canvas.addEventListener("wheel", e => { e.preventDefault(); flight = null; state.dist = Math.min(8, Math.max(0.3, state.dist * Math.exp(e.deltaY * 0.0012))); redraw(); }, { passive: false });
+document.querySelectorAll("#views button").forEach(b => b.onclick = () => { flight = null; setView(b.dataset.view); });
+
+// ---------------------------------------------------------------- controls
+function syncOutputs() {
+  for (const id of ["opacity", "thr", "relief", "cap"]) ui[id].nextElementSibling.textContent = id === "cap" ? ui[id].value : fmt(ui[id].value * 100) + "%";
+  const red = ui.colors.value === "0";
+  $("legendText").textContent = red ? "evidence for disease: weak → strong" : "evidence: little → strong";
+  $("legendBar").style.background = red ? "linear-gradient(90deg,#73000a,#ff1a0d 80%,#ffcc59)" : "linear-gradient(90deg,#00f,#0ff,#0f0,#ff0,#f00)";
+}
+for (const id in ui) ui[id].addEventListener("input", () => { if (id === "map") updateMeshHeat(); if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); redraw(); });
+
+// ---------------------------------------------------------------- drawing one frame
+function drawLines(segments, color, mvp) {
+  gl.useProgram(lines);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufLines); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(segments), gl.DYNAMIC_DRAW);
+  const loc = gl.getAttribLocation(lines, "aPos"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+  gl.uniformMatrix4fv(gl.getUniformLocation(lines, "uMVP"), false, mvp); gl.uniform4fv(gl.getUniformLocation(lines, "uColor"), color);
+  gl.drawArrays(gl.LINES, 0, segments.length / 3);
+}
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (flight) flight(now);
+  const w = Math.round(canvas.clientWidth * devicePixelRatio), h = Math.round(canvas.clientHeight * devicePixelRatio);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; state.dirty = true; }
+  if (!state.dirty || !state.eye || !w || !h) return;
+  state.dirty = false;
+  const cam = camera(), cap = capRad(), relief = Number(ui.relief.value);
+  gl.viewport(0, 0, w, h); gl.clearColor(0.055, 0.067, 0.086, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+
+  // 1. the retina
+  gl.useProgram(retina);
+  const U = n => gl.getUniformLocation(retina, n), A = n => gl.getAttribLocation(retina, n);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufP); gl.enableVertexAttribArray(A("aP")); gl.vertexAttribPointer(A("aP"), 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufHeat); gl.enableVertexAttribArray(A("aHeat")); gl.vertexAttribPointer(A("aHeat"), 1, gl.FLOAT, false, 0, 0);
+  gl.uniformMatrix4fv(U("uMVP"), false, cam.mvp); gl.uniform1f(U("uCap"), cap); gl.uniform1f(U("uRelief"), relief);
+  gl.uniform1f(U("uOpacity"), Number(ui.opacity.value)); gl.uniform1f(U("uThr"), Number(ui.thr.value));
+  gl.uniform1i(U("uColors"), Number(ui.colors.value)); gl.uniform1i(U("uVesselMode"), Number(ui.vessels.value)); gl.uniform1i(U("uGray"), ui.gray.checked ? 1 : 0);
+  [["uPhoto", tex.photo], ["uHeat", ui.map.value === "coarse" ? tex.coarse : tex.heat], ["uVessels", tex.vessels]].forEach(([name, t], unit) => {
+    gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(U(name), unit); });
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIndex); gl.drawElements(gl.TRIANGLES, meshIndex.length, gl.UNSIGNED_SHORT, 0);
+
+  // 2. rings around the findings (the selected one brighter and doubled), then the see-through eyeball
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  const rings = [], selected = [], pinTips = [];
+  for (const f of state.eye.findings) {
+    const centre = photoToSphere(f.x, f.y, cap), lift = 0.985 - relief, angle = Math.max(0.03, f.radius * cap * 1.25);
+    const into = f.id === state.sel ? selected : rings;
+    into.push(...loopToSegments(circleOnSphere(centre, angle, lift, 40)));
+    if (f.id === state.sel) into.push(...loopToSegments(circleOnSphere(centre, angle * 1.08, lift, 40)));
+    const tip = mul(centre, 0.80 - relief); pinTips.push([f.id, tip]);
+    if (ui.pinsOn.checked) into.push(...mul(centre, lift), ...tip);          // the pin's stalk, toward the eye's centre
+  }
+  if (ui.pinsOn.checked || selected.length) { drawLines(rings, [1, 0.35, 0.28, 0.75], cam.mvp); drawLines(selected, [1, 1, 1, 1], cam.mvp); }
+  drawLines(loopToSegments(circleOnSphere([0, 0, -1], cap, 0.995, 96)), [0.42, 0.77, 1, 0.55], cam.mvp);   // edge of the photographed cap
+  gl.depthMask(false);
+  drawLines(globeLines, [0.75, 0.82, 0.95, 0.10], cam.mvp); drawLines(irisLines, [0.42, 0.77, 1, 0.5], cam.mvp);
+  gl.depthMask(true);
+
+  // 3. the numbered pins: project each pin's tip to the screen and move its HTML label there
+  for (const [id, tip] of pinTips) {
+    const el = document.querySelector(`.pin[data-id="${id}"]`); if (!el) continue;
+    const m = cam.mvp, x = m[0] * tip[0] + m[4] * tip[1] + m[8] * tip[2] + m[12], y = m[1] * tip[0] + m[5] * tip[1] + m[9] * tip[2] + m[13],
+          wc = m[3] * tip[0] + m[7] * tip[1] + m[11] * tip[2] + m[15];
+    const on = wc > 0.02 && Math.abs(x / wc) < 1 && Math.abs(y / wc) < 1;
+    el.style.display = on ? "" : "none";
+    if (on) { el.style.left = (x / wc * 0.5 + 0.5) * canvas.clientWidth + "px"; el.style.top = (0.5 - y / wc * 0.5) * canvas.clientHeight + "px"; }
+  }
+}
+
+// ---------------------------------------------------------------- start
+$("runline").textContent = `Run ${META.run} · model from epoch ${META.epoch} (validation AUC ${fmt(META.val_auc, 3)}) · validation eyes only`;
+ui.cap.value = META.cap_deg;
+EYES.forEach((e, i) => { const o = document.createElement("option"); o.value = i; o.textContent = `${e.name} · grade ${e.grade} · ${(GROUPS[e.group] || e.group).split(" (")[0]}`; $("eyeSelect").appendChild(o); });
+$("eyeSelect").onchange = e => showEye(Number(e.target.value));
+syncOutputs();
+showEye(0).then(() => requestAnimationFrame(frame));
+window.addEventListener("resize", redraw);
+</script>
+</body>
+</html>

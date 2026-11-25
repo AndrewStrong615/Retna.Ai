@@ -1,0 +1,1148 @@
+<!doctype html>
+<!--
+  OCT 3D viewer: the page that oct3d.py fills in (it replaces the OCT_DATA marker
+  below with one scan's surfaces, thickness and B-scans). One file, hand-written
+  WebGL, no library, no internet.
+
+  Unlike eye3d_viewer.html, the SHAPE here is measured. Coordinates are in
+  millimetres:  x = along a B-scan,  z = from the first B-scan to the last,
+  y = up (toward the inside of the eye), multiplied by the "stretch" slider,
+  because a retina is ~0.3 mm thick and 6 mm wide and looks flat at true scale.
+
+  Three shapes are offered ("Shape" in the Display section):
+    - SCAN ONLY (default): nothing is drawn that does not come from the data. The photo (its own
+      colours, no tint, no lighting) and the OCT patch are curved onto a shell of radius 11 mm (the
+      retina's place in a standard 24 mm eye: an ASSUMED curve, the scan does not measure it), on a
+      dark background with a faint 1 mm grid. Inside the scanned square the height is the measured
+      thickness, and the cut edges show the OCT's own cross-sections. Outside it nothing measures
+      height: the photo lies at the scan's median thickness, its rim is plain grey. An optional,
+      clearly labelled switch adds relief GUESSED from the photo's brightness (not measured).
+    - EYEBALL: a textbook-style cutaway of a standard 24 mm eye. The top-front quarter is cut
+      away, and the cut faces show the three coats of the wall (white sclera, dark red choroid,
+      peach retina). In front: cornea, anterior chamber, iris with pupil, pleated ciliary body,
+      zonular fibres, lens; outside: four rectus muscle stubs and the optic nerve with its
+      central artery and vein. ALL of that is a standard DRAWING with named parts, not this eye.
+      The scanned patch (and the photo, if one was lined up) is curved onto the inside back
+      wall: a point x, y millimetres from the patch centre sits at the angle (distance / 11 mm)
+      from the back pole (11 mm = the radius of the retina's back surface), so distances along
+      the wall stay true. What is measured: the retina's thickness (its lower surface is laid
+      on the wall, the inner surface rises from it by the measured thickness x the relief
+      slider) and where the photo lines up with the scan. The drawn retina around the patch is
+      given this scan's median thickness, so the patch sits flush and only real differences
+      stand out.
+    - FLAT BLOCK: the scan exactly as measured, in its own box, including its own tilt.
+
+  Three things are drawn from the scan:
+    1. the inner surface (ILM): a grid of measured depths, lit from above, and
+       mixed with red where the retina under it is thicker than the threshold;
+    2. the lower surface (the bright band at the bottom of the retina);
+    3. one B-scan, standing upright at its real position: the raw data itself.
+  A click sends a ray from the camera and walks along it until it goes below the
+  inner surface: that is the point you clicked.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCT 3D view</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171b22; --line:#2a303b; --text:#e6e9ee; --dim:#9aa3b2; --red:#ff4d3d; --accent:#6cc5ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+               font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display:flex; height:100%; }
+  #stage { position:relative; flex:1; min-width:0; }
+  canvas#gl { display:block; width:100%; height:100%; cursor:grab; touch-action:none; }
+  canvas#gl.drag { cursor:grabbing; }
+  #side { width:372px; max-width:100%; background:var(--panel); border-left:1px solid var(--line);
+          overflow-y:auto; padding:14px 16px 24px; }
+  h1 { font-size:16px; margin:0 0 2px; }
+  h2 { font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); margin:18px 0 6px; }
+  select { font:inherit; color:var(--text); background:#222833; border:1px solid var(--line); border-radius:6px; padding:6px 8px; flex:1; min-width:0; }
+  .tag.good { color:#a8e6b4; border-color:#2d6a3a; } .tag.bad { color:#ffb3aa; border-color:#7a2d26; }
+  .pin.spot { border-color:#ffd84d; }
+  button { font:inherit; color:var(--text); background:#222833; border:1px solid var(--line); border-radius:6px; padding:6px 8px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .row label { flex:0 0 132px; color:var(--dim); }
+  .row input[type=range] { flex:1; min-width:0; }
+  .row output { flex:0 0 58px; text-align:right; font-variant-numeric:tabular-nums; }
+  .facts { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin:6px 0 0; }
+  .facts dt { color:var(--dim); } .facts dd { margin:0; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:10px; font-size:12px; border:1px solid #7a5a26; color:#ffd9a0; }
+  .finding { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 0; cursor:pointer; }
+  .finding:hover { border-color:var(--accent); }
+  .finding.sel { border-color:var(--red); background:#241a1b; }
+  .finding b { color:var(--red); } .finding small { color:var(--dim); display:block; }
+  .note { color:var(--dim); font-size:12.5px; border-left:3px solid var(--line); padding-left:10px; margin:8px 0; }
+  .note strong { color:var(--text); }
+  #probe { min-height:3.2em; }
+  #bscan { width:100%; display:block; border:1px solid var(--line); border-radius:6px; background:#000; }
+  .pin { position:absolute; transform:translate(-50%,-50%); width:22px; height:22px; border-radius:50%;
+         background:rgba(20,20,24,.85); border:2px solid var(--red); color:#fff; font-size:12px; font-weight:600;
+         display:flex; align-items:center; justify-content:center; cursor:pointer; user-select:none; }
+  .pin.sel { background:var(--red); border-color:#fff; }
+  #estBanner { position:absolute; left:50%; transform:translateX(-50%); bottom:64px; z-index:5; max-width:80%;
+    padding:8px 14px; border-radius:8px; background:rgba(122,45,38,.92); border:1px solid #ffb3aa; color:#fff;
+    font-weight:600; text-align:center; pointer-events:none; }
+  #views { position:absolute; left:12px; top:12px; right:12px; display:flex; gap:6px; flex-wrap:wrap; }
+  /* bottom line of the picture: three boxes side by side that wrap instead of overlapping */
+  #hud { position:absolute; left:12px; right:12px; bottom:10px; display:flex; flex-wrap:wrap; gap:4px 18px; align-items:flex-end;
+         justify-content:space-between; color:var(--dim); font-size:12px; pointer-events:none; }
+  #legend { text-align:right; margin-left:auto; }
+  /* part names: text boxes at the sides, joined to their part by a thin line (drawn in the svg) */
+  #leaders { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
+  #leaders line { stroke:#cfd6e2; stroke-width:1; opacity:.75; } #leaders circle { fill:#fff; }
+  .lab { position:absolute; transform:translateY(-50%); font-size:12.5px; color:#e9edf3; background:rgba(14,17,22,.78);
+         border:1px solid var(--line); padding:1px 7px; border-radius:4px; white-space:nowrap; pointer-events:none; }
+  .mini { padding:2px 7px; font-size:12px; }
+  #legend i { display:block; width:170px; height:10px; border-radius:5px; margin:3px 0 0 auto; background:linear-gradient(90deg,#73000a,#ff1a0d 80%,#ffcc59); }
+  @media (max-width: 760px) { #app { flex-direction:column; } #side { width:100%; height:50%; border-left:0; border-top:1px solid var(--line); }
+                              #stage { height:50%; flex:none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <div id="pins"></div>
+    <!-- shown only for pages written by photo2oct.py: nothing on such a page was measured -->
+    <div id="estBanner" style="display:none"></div>
+    <div id="views">
+    </div>
+    <svg id="leaders"></svg>
+    <div id="labels"></div>
+    <div id="hud">
+      <div id="hint">Drag to turn · wheel or pinch to zoom · click the scanned patch to measure a spot</div>
+      <div id="hudRelief"></div>
+      <div id="legend"><span id="legendText"></span><i></i></div>
+    </div>
+  </div>
+  <div id="side">
+    <h1>OCT 3D view</h1>
+    <div style="color:var(--dim)" id="source"></div>
+    <dl class="facts" id="facts"></dl>
+
+    <div id="fusionBox" style="display:none">
+      <h2>Photo lined up with the scan</h2>
+      <img id="regCheck" alt="alignment check" style="width:100%;display:block;border:1px solid var(--line);border-radius:6px">
+      <div class="note" id="regText" style="margin-top:6px"></div>
+      <h2>Model hot spots (from the photo)</h2>
+      <div id="hotspots"></div>
+    </div>
+
+    <h2>Thickened areas (measured in the scan)</h2>
+    <div id="findings"></div>
+
+    <h2>Clicked spot</h2>
+    <div id="probe" class="note">Click anywhere on the surface.</div>
+
+    <h2>B-scan (the raw data)</h2>
+    <canvas id="bscan"></canvas>
+    <div class="row"><label for="slice">Scan</label><input id="slice" type="range" min="0" max="0" step="1" value="0"><output></output></div>
+    <div class="note" style="margin-top:2px">Blue line: inner surface found. Yellow line: lower surface found. If a line is off the tissue edge, the numbers there are wrong.</div>
+
+    <h2>Display</h2>
+    <div class="row"><label for="shape">Shape</label>
+      <select id="shape"><option value="2">Scan only (curved, nothing drawn)</option><option value="1">Textbook eye (drawn eye around the scan)</option><option value="0">Flat block (as scanned)</option></select></div>
+    <div class="row eyeRow"><label for="nerve">Optic nerve drawn</label>
+      <select id="nerve"><option value="-1">on the left</option><option value="1">on the right</option><option value="0">hidden</option></select></div>
+    <div class="row eyeRow"><label for="cutOpen">Cut the eye open</label><input id="cutOpen" type="checkbox" checked></div>
+    <div class="row eyeRow"><label for="labelsOn">Part names</label><input id="labelsOn" type="checkbox" checked></div>
+    <div class="row"><label for="texMode">Surface shows</label>
+      <select id="texMode"><option value="1">True photo colours</option><option value="0">OCT seen from above (grey)</option><option value="2">OCT depth in grey (thick = bright)</option></select></div>
+    <div class="row"><label for="redMode">Red tint</label>
+      <select id="redMode"><option value="-1">None (true colours)</option><option value="1">Model heat (from the photo)</option><option value="0">Retina thickness (measured)</option></select></div>
+    <div class="row"><label for="shade">Light the relief</label><input id="shade" type="checkbox"></div>
+    <div class="row scanRow"><label for="estRelief">Guess relief from photo</label><input id="estRelief" type="checkbox"><span class="tag">estimated</span></div>
+    <div class="row heatRow"><label for="heatThr">Hide heat below</label><input id="heatThr" type="range" min="0" max="0.95" step="0.01" value="0.2"><output></output></div>
+    <div class="row"><label for="thr">Thick above</label><input id="thr" type="range" step="1"><output></output></div>
+    <div class="row"><label for="opacity">Red strength</label><input id="opacity" type="range" min="0" max="1" step="0.01" value="0.85"><output></output></div>
+    <div class="row"><label for="stretch">Relief (depth x)</label><input id="stretch" type="range" min="1" max="5" step="0.1" value="3"><output></output></div>
+    <div class="row"><label></label><button class="mini" id="relief1">1x anatomical</button><button class="mini" id="relief5">5x relief</button></div>
+    <div class="row flatRow"><label for="showLow">Lower surface</label><input id="showLow" type="checkbox" checked></div>
+    <div class="row"><label for="showSlice">B-scan in 3D</label><input id="showSlice" type="checkbox" checked></div>
+    <div class="row"><label for="cut">Cut away in front</label><input id="cut" type="checkbox" checked></div>
+    <div class="row"><label for="pinsOn">Numbered pins</label><input id="pinsOn" type="checkbox" checked></div>
+
+    <h2>What this is, and is not</h2>
+    <div class="note"><strong>Scan only: every colour and every height comes from the data, the curve does not.</strong>
+      Colours are the photo's own pixels (or the OCT's grey values). Inside the scanned square the surface rises by the
+      measured retina thickness, and the cut edges show the OCT's own cross-sections with its real layers. NOT measured:
+      the curve itself (a ball of radius 11 mm, where the retina lies in a standard 24 mm eye; the OCT's own tilt is
+      dropped), where the square sits on it, and any height OUTSIDE the square: there the photo is laid at the scan's
+      median thickness and its rim is plain grey, because one photo holds no depth. "Light the relief" adds shading so the
+      shape is easier to see; it darkens colours, so it is off by default here.</div>
+    <div class="note"><strong>"Guess relief from photo" is an estimate, not a measurement.</strong> It raises thin dark
+      lines (vessels) and lowers the brightest area (the optic disc) of the photo, from brightness alone. Real vessels
+      are not that much raised and a bright disc is not always a deep one. Use it to look, never to measure; clicks keep
+      reporting only the OCT's numbers.</div>
+    <div class="note"><strong>Textbook eye: the eye is a drawing, the patch is measured.</strong> Sclera, choroid,
+      cornea, iris, ciliary body, zonules, lens, muscles and optic nerve are a standard 24 mm eye drawn for orientation,
+      the same for every scan; the coats of the wall are drawn thicker than life so their colours can be seen. NOT
+      measured: this eye's size, exactly where the scan sits on the back wall (assumed: centred on the back pole) and the
+      side of the optic nerve (choose it above; with a photo, the real one shows as the bright disc). Measured: the
+      retina's thickness everywhere in the patch, and where the photo lines up with the scan. The scan's own tilt is
+      dropped here: its lower surface lies on the wall and the inner surface rises by the measured thickness.</div>
+    <div class="note"><strong>Relief.</strong> At 1x the patch has its true proportions (a retina is about 0.3 mm thick on an
+      11 mm wall, so swelling is hard to see). Up to 5x multiplies only the thickness, of the patch and of the drawn
+      retina around it alike, so the patch stays flush and differences stand out. The numbers never change with it.
+      With "Cut away in front" on, the part of the patch in front of the B-scan is removed; the dark red floor there is
+      the layer under the retina (the scan's lower surface, laid on the wall).</div>
+    <div class="note"><strong>Flat block shape: exactly as scanned.</strong> Every point of the surface comes from the OCT
+      scan, in micrometres. "Relief" only makes it easier to see; at 1x the proportions are true.
+      <span id="spacingNote"></span></div>
+    <div class="note"><strong>The surfaces are found by a classical method</strong> (strongest dark-to-bright edges, joined
+      into smooth lines), not by a trained model. It can fail in shadows, very swollen retina, or at the optic disc. Check
+      the lines on the B-scan. The lower line is the top of the bright band, so thickness reads some tens of micrometres
+      lower than a device's own number. <span id="deviceNote"></span></div>
+    <div class="note"><strong>Red = thicker than the threshold</strong>, which by default means clearly thicker than the rest
+      of this scan. There is no database of normal eyes behind it. It is a measurement, not a diagnosis.</div>
+    <div class="note" id="aiNote"><strong>No AI heat map here.</strong> The disease model reads fundus photos and has never seen OCT. Give oct3d.py a photo of the same eye (--photo, --heat) to lay its findings onto this surface.</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const D = /*OCT_DATA*/;
+const $ = id => document.getElementById(id);
+const fmt = (v, d) => Number(v).toFixed(d === undefined ? 0 : d);
+
+// ---------------------------------------------------------------- the measurements
+function floats(b64) {          // text from oct3d.py -> numbers
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
+const [ROWS, COLS] = D.grid;                    // rows = B-scans, columns = along a B-scan
+const ILM = floats(D.ilm_um), LOW = floats(D.low_um);        // depth below the top of the scan, micrometres
+const [W, L, DEPTH] = D.size_mm;                // width, length (first to last scan), depth, in mm
+const D0 = DEPTH / 2;                           // the depth that sits at height 0
+const THICK = ILM.map((v, i) => LOW[i] - v);
+const rowV = r => (Math.round(r * (D.scans - 1) / Math.max(1, ROWS - 1)) + 0.5) / D.scans;   // where grid row r lies, 0..1
+const colU = c => (c + 0.5) / COLS;
+function at(grid, u, v) {       // value at a position (u along the scan, v across scans), blended from the 4 nearest points
+  const cf = Math.min(COLS - 1, Math.max(0, u * COLS - 0.5)), rf = Math.min(ROWS - 1, Math.max(0, (v * D.scans - 0.5) * (ROWS - 1) / Math.max(1, D.scans - 1)));
+  const c0 = Math.floor(cf), r0 = Math.floor(rf), c1 = Math.min(COLS - 1, c0 + 1), r1 = Math.min(ROWS - 1, r0 + 1), a = cf - c0, b = rf - r0;
+  return (grid[r0 * COLS + c0] * (1 - a) + grid[r0 * COLS + c1] * a) * (1 - b) + (grid[r1 * COLS + c0] * (1 - a) + grid[r1 * COLS + c1] * a) * b;
+}
+
+// ---------------------------------------------------------------- vector / matrix helpers (4x4, column by column)
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => mul(a, 1 / (Math.hypot(a[0], a[1], a[2]) || 1));
+function perspective(fovY, aspect, near, far) {
+  const f = 1 / Math.tan(fovY / 2), d = 1 / (near - far);
+  return [f / aspect, 0, 0, 0,  0, f, 0, 0,  0, 0, (far + near) * d, -1,  0, 0, 2 * far * near * d, 0];
+}
+function lookAt(eye, right, up, fwd) {
+  return [right[0], up[0], -fwd[0], 0,  right[1], up[1], -fwd[1], 0,  right[2], up[2], -fwd[2], 0, -dot(right, eye), -dot(up, eye), dot(fwd, eye), 1];
+}
+function matMul(a, b) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+  return o;
+}
+
+// ---------------------------------------------------------------- WebGL
+const canvas = $("gl");
+const gl = canvas.getContext("webgl", { antialias: true, alpha: false });
+if (!gl) { document.body.innerHTML = "<p style='padding:20px'>This browser cannot show WebGL (3D) content.</p>"; throw new Error("no webgl"); }
+function program(vsSource, fsSource) {
+  const make = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  const p = gl.createProgram();
+  gl.attachShader(p, make(gl.VERTEX_SHADER, vsSource)); gl.attachShader(p, make(gl.FRAGMENT_SHADER, fsSource));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+// A measured surface. Each corner of the grid knows its position in the scan (aUV), its measured
+// depth in mm (aDepth), how steeply the surface slopes there (aSlope) and the thickness under it.
+const surface = program(`
+  attribute vec2 aUV; attribute float aDepth, aThick; attribute vec2 aSlope, aThickSlope;
+  uniform mat4 uMVP; uniform vec3 uSize; uniform float uStretch, uR;  // uSize = (width, length, depth that sits at height 0); uR = eyeball radius
+  uniform bool uCurved, uLower;
+  varying vec2 vUV; varying float vThick; varying vec3 vNormal;
+  void main() {
+    vUV = aUV; vThick = aThick;
+    if (uCurved) {
+      // Eyeball: l = position on the wall in mm from the patch centre. Its length, divided by the
+      // radius, is the angle from the back pole (so distances along the wall stay true).
+      vec2 l = vec2((aUV.x - 0.5) * uSize.x, (aUV.y - 0.5) * uSize.y);
+      float along = length(l), th = along / uR;
+      vec2 dir = along > 1e-6 ? l / along : vec2(0.0);
+      // The lower surface lies ON the wall; the inner surface is closer to the eye's centre by the thickness.
+      float r = uR - (uLower ? 0.0 : aThick / 1000.0 * uStretch);
+      vNormal = uLower ? vec3(0.0, 1.0, 0.0) : vec3(-uStretch * aThickSlope.x, 1.0, -uStretch * aThickSlope.y);
+      gl_Position = uMVP * vec4(sin(th) * dir.x * r, -sin(th) * dir.y * r, -cos(th) * r, 1.0);
+      return;
+    }
+    // Flat block. Height = -depth: deeper is lower. The surface's normal (the direction it faces) follows from its slopes.
+    vNormal = vec3(uStretch * aSlope.x, 1.0, uStretch * aSlope.y);
+    gl_Position = uMVP * vec4((aUV.x - 0.5) * uSize.x, (uSize.z - aDepth) * uStretch, (aUV.y - 0.5) * uSize.y, 1.0);
+  }`, `
+  precision mediump float;
+  uniform sampler2D uEnFace, uPhoto, uHeat; uniform float uThr, uMax, uOpacity, uCutV, uHeatThr;
+  uniform bool uCut, uLower, uCurved, uShade, uScanOnly; uniform int uTexMode, uRedMode; uniform float uMin;
+  varying vec2 vUV; varying float vThick; varying vec3 vNormal;
+  void main() {
+    if (uCut && vUV.y > uCutV) discard;                        // cut away what is in front of the B-scan
+    float light = uShade ? 0.40 + 0.60 * abs(dot(normalize(vNormal), normalize(vec3(0.35, 0.85, 0.40)))) : 1.0;   // no lighting = the data's own colours
+    vec3 col;
+    if (uLower) col = uScanOnly ? vec3(0.12 + 0.55 * texture2D(uEnFace, vUV).r)      // scan only: the OCT seen from above, in grey
+                    : uCurved ? vec3(0.50, 0.20, 0.16) : vec3(0.62, 0.46, 0.26);   // textbook eye: the dark layer under the retina
+    else {
+      if (uTexMode == 1) col = texture2D(uPhoto, vUV).rgb;                       // the fundus photo, lined up with the scan
+      else if (uTexMode == 2) col = vec3(clamp((vThick - uMin) / max(uMax - uMin, 1.0), 0.0, 1.0));   // measured thickness as grey
+      else col = vec3(0.80, 0.76, 0.74) * (0.45 + 0.55 * texture2D(uEnFace, vUV).r);   // the scan seen from above
+      // What is painted red: the measured thickness, or the model's heat carried over from the photo.
+      float t = -1.0;
+      if (uRedMode == 1) { float h = texture2D(uHeat, vUV).r; if (h > uHeatThr) t = (h - uHeatThr) / (1.0 - uHeatThr); }
+      else if (uRedMode == 0 && vThick > uThr) t = clamp((vThick - uThr) / max(uMax - uThr, 1.0), 0.0, 1.0);
+      if (t >= 0.0) {
+        vec3 hot = t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8)
+                           : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2);
+        col = mix(col, hot, uOpacity * (0.45 + 0.55 * t));
+      }
+    }
+    gl_FragColor = vec4(col * light, 1.0);
+  }`);
+// The upright B-scan: a rectangle with the scan picture on it.
+const slab = program(`
+  attribute vec3 aPos; attribute vec2 aTex; uniform mat4 uMVP; varying vec2 vTex;
+  void main() { vTex = aTex; gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; uniform sampler2D uScan; varying vec2 vTex;
+  void main() { gl_FragColor = vec4(texture2D(uScan, vTex).rgb, 1.0); }`);
+// Where a point of the eyeball lies on the scan: millimetres from the patch centre, measured along the wall.
+// (The reverse of the curving in the surface shader above.) Used to leave a hole where the measured patch goes.
+const ON_SCAN = `
+  uniform float uR; uniform vec2 uHalf;
+  bool inPatch(vec3 p) {
+    if (p.z >= 0.0) return false;
+    float r = length(p), side = length(p.xy), k = side > 1e-6 ? acos(clamp(-p.z / r, -1.0, 1.0)) * uR / side : 0.0;
+    return abs(p.x * k) < uHalf.x && abs(p.y * k) < uHalf.y;
+  }`;
+const PRECISION = `
+  #ifdef GL_FRAGMENT_PRECISION_HIGH
+  precision highp float;
+  #else
+  precision mediump float;
+  #endif`;
+// The whole photo on the eyeball's back wall (eyeball shape, when a photo was lined up). Each corner
+// stores only its DIRECTION from the eye's centre; uRad says how far out (the retina's inner surface).
+const wall = program(`
+  attribute vec3 aPos; attribute vec2 aTex; attribute float aLift; uniform mat4 uMVP; uniform float uRad, uEst; varying vec2 vTex; varying vec3 vPos;
+  // aLift = the height GUESSED from the photo's brightness (mm, toward the eye's centre); uEst = 0 switches it off
+  void main() { vTex = aTex; vPos = aPos * (uRad - aLift * uEst); gl_Position = uMVP * vec4(vPos, 1.0); }`, PRECISION + ON_SCAN + `
+  uniform sampler2D uPhoto, uHeat; uniform bool uHeatOn; uniform float uHeatThr, uOpacity, uDim; varying vec2 vTex; varying vec3 vPos;
+  void main() {
+    if (length(vTex - 0.5) > 0.485) discard;                   // outside the round picture
+    if (inPatch(vPos)) discard;                                // the measured patch is drawn there instead
+    vec3 col = texture2D(uPhoto, vTex).rgb;
+    float h = texture2D(uHeat, vTex).r;
+    if (uHeatOn && h > uHeatThr) {
+      float t = (h - uHeatThr) / (1.0 - uHeatThr);
+      vec3 hot = t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8) : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2);
+      col = mix(col, hot, uOpacity * (0.45 + 0.55 * t));
+    }
+    gl_FragColor = vec4(col * uDim, 1.0);
+  }`);
+// Every drawn (not measured) part of the eye: one colour per part, lit from above and from the viewer.
+//   uClip 1 = the top-front quarter is cut away (y > 0 and z > uCutZ); 2 = a cut face on the plane y = 0, kept only in front of uCutZ.
+//   uStyle 1 = iris (fibres drawn from the angle around the pupil); 2 = glossy (lens, cornea); 3 = flat colour (cut faces).
+const solid = program(`
+  attribute vec3 aPos, aNormal; uniform mat4 uMVP; varying vec3 vPos, vN;
+  void main() { vPos = aPos; vN = aNormal; gl_Position = uMVP * vec4(aPos, 1.0); }`, PRECISION + ON_SCAN + `
+  uniform vec4 uColor; uniform vec3 uEye; uniform int uClip, uStyle; uniform float uCutZ; uniform bool uHole; varying vec3 vPos, vN;
+  void main() {
+    if (uClip == 1 && vPos.y > 0.0 && vPos.z > uCutZ) discard;
+    if (uClip == 2 && vPos.z < uCutZ) discard;
+    if (uHole && inPatch(vPos)) discard;
+    vec3 col = uColor.rgb; float alpha = uColor.a;
+    if (uStyle == 3) { gl_FragColor = vec4(col, alpha); return; }
+    vec3 n = normalize(vN), toEye = normalize(uEye - vPos), sun = normalize(vec3(0.3, 0.8, 0.5));
+    if (uStyle == 1) {            // iris: fine radial fibres, a browner ring near the pupil, a dark edge
+      float a = atan(vPos.y, vPos.x), t = clamp((length(vPos.xy) - 1.8) / 3.95, 0.0, 1.0);
+      float fibres = 0.5 + 0.5 * sin(a * 90.0 + 2.0 * sin(a * 13.0) + t * 4.0);
+      col = mix(vec3(0.50, 0.36, 0.20), col, smoothstep(0.12, 0.40, t)) * (0.68 + 0.32 * fibres) * (1.0 - 0.45 * smoothstep(0.86, 1.0, t));
+    }
+    col *= 0.42 + 0.38 * abs(dot(n, sun)) + 0.20 * abs(dot(n, toEye));
+    if (uStyle == 2) {            // gloss: a highlight where the surface mirrors the light, denser at grazing angles
+      float shine = pow(abs(dot(n, normalize(toEye + sun))), 48.0);
+      col += vec3(0.7 * shine); alpha = min(1.0, alpha * (0.55 + 1.5 * (1.0 - abs(dot(n, toEye)))) + 0.7 * shine);
+    }
+    gl_FragColor = vec4(col, alpha);
+  }`);
+const lines = program(`
+  attribute vec3 aPos; uniform mat4 uMVP;
+  void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; uniform vec4 uColor;
+  void main() { gl_FragColor = uColor; }`);
+
+const buf = (target, data) => { const b = gl.createBuffer(); gl.bindBuffer(target, b); gl.bufferData(target, data, gl.STATIC_DRAW); return b; };
+// The grid, shared by both surfaces: positions, and triangles joining neighbouring points.
+const uv = new Float32Array(ROWS * COLS * 2);
+for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) { uv[(r * COLS + c) * 2] = colU(c); uv[(r * COLS + c) * 2 + 1] = rowV(r); }
+const index = new Uint16Array((ROWS - 1) * (COLS - 1) * 6);
+for (let r = 0, n = 0; r < ROWS - 1; r++) for (let c = 0; c < COLS - 1; c++) {
+  const a = r * COLS + c, b = a + 1, d = a + COLS, e = d + 1; index.set([a, d, b, b, d, e], n); n += 6;
+}
+function slopes(grid) {         // how much the depth (mm) changes per mm sideways (x) and per mm across scans (z)
+  const s = new Float32Array(ROWS * COLS * 2), dx = W / COLS, dz = L * (rowV(Math.min(1, ROWS - 1)) - rowV(0)) || 1;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const c0 = Math.max(0, c - 1), c1 = Math.min(COLS - 1, c + 1), r0 = Math.max(0, r - 1), r1 = Math.min(ROWS - 1, r + 1);
+    s[(r * COLS + c) * 2] = (grid[r * COLS + c1] - grid[r * COLS + c0]) / 1000 / ((c1 - c0) * dx || 1);
+    s[(r * COLS + c) * 2 + 1] = (grid[r1 * COLS + c] - grid[r0 * COLS + c]) / 1000 / ((r1 - r0) * dz || 1);
+  }
+  return s;
+}
+const bufUV = buf(gl.ARRAY_BUFFER, uv), bufIndex = buf(gl.ELEMENT_ARRAY_BUFFER, index), bufThick = buf(gl.ARRAY_BUFFER, THICK);
+const bufThickSlope = buf(gl.ARRAY_BUFFER, slopes(THICK));
+
+// ---------------------------------------------------------------- the standard eye (a DRAWING, in mm)
+// The eye's axis is z: the cornea is at +z, the back pole (where the scan is laid) at -z; y is up.
+const R = 11;                                   // radius of the retina's BACK surface: the wall the scan is laid on
+const R_CHOROID = 11.1, R_SCLERA = 11.45, R_OUT = 12;      // choroid from 11.1 to 11.45, sclera from 11.45 to 12 (24 mm across)
+const MED = D.thickness_um.median / 1000;       // this scan's median retina thickness, mm: the drawn retina gets the same
+const CUT_Z = -1.5;                             // the cut-away quarter is y > 0 (top) and z > CUT_Z (front)
+const ORA = 1.05;                               // where the retina ends in front (ora serrata), as an angle from the +z axis
+const smooth = t => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); };
+const retinaTaper = a => 0.25 + 0.75 * smooth((a - ORA) / 0.35);   // the retina thins out toward the ora
+const tiltY = (p, t) => [p[0] * Math.cos(t) + p[2] * Math.sin(t), p[1], -p[0] * Math.sin(t) + p[2] * Math.cos(t)];
+const freeMesh = m => { if (m) { gl.deleteBuffer(m.pos); if (m.nor) gl.deleteBuffer(m.nor); if (m.idx) gl.deleteBuffer(m.idx); } };
+
+// A surface given as a grid of points, point(i, j). The direction each point faces (its normal, needed
+// for the lighting) is worked out from its neighbours: across the two grid directions.
+function gridMesh(ni, nj, point) {
+  const pos = new Float32Array(ni * nj * 3), nor = new Float32Array(ni * nj * 3), idx = [];
+  for (let i = 0; i < ni; i++) for (let j = 0; j < nj; j++) pos.set(point(i, j), (i * nj + j) * 3);
+  const P = (i, j) => { const k = (Math.max(0, Math.min(ni - 1, i)) * nj + Math.max(0, Math.min(nj - 1, j))) * 3; return [pos[k], pos[k + 1], pos[k + 2]]; };
+  for (let i = 0; i < ni; i++) for (let j = 0; j < nj; j++) nor.set(norm(cross(sub(P(i + 1, j), P(i - 1, j)), sub(P(i, j + 1), P(i, j - 1)))), (i * nj + j) * 3);
+  for (let i = 0; i < ni - 1; i++) for (let j = 0; j < nj - 1; j++) { const a = i * nj + j, b = a + 1, c = a + nj, d = c + 1; idx.push(a, c, b, b, c, d); }
+  return { pos: buf(gl.ARRAY_BUFFER, pos), nor: buf(gl.ARRAY_BUFFER, nor), idx: buf(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx)), count: idx.length };
+}
+// A shape made by spinning an outline around the eye's axis: outline = points (distance from the axis, z).
+// `place` (optional) moves every point afterwards, e.g. to tilt the optic nerve.
+function spun(outline, segments, place) {
+  return gridMesh(outline.length, segments + 1, (i, j) => { const t = j / segments * 2 * Math.PI, p = [outline[i][0] * Math.cos(t), outline[i][0] * Math.sin(t), outline[i][1]]; return place ? place(p) : p; });
+}
+// Part of a circle in the (distance from axis, z) plane; angles are measured from the +z axis.
+const arc = (radius, centreZ, from, to, n) => Array.from({ length: n + 1 }, (_, i) => { const a = from + (to - from) * i / n; return [radius * Math.sin(a), centreZ + radius * Math.cos(a)]; });
+
+// Cornea: a steeper dome (radius 7.8, 0.6 mm thick) set into the front of the 12 mm globe; they meet at the limbus.
+const CORNEA_Z = 5.35, CORNEA_A = Math.asin(5.9 / 7.8);
+const LIMBUS_OUT = Math.asin(5.9 / R_OUT), LIMBUS_IN = Math.asin(5.45 / R_SCLERA);
+const corneaOut = arc(7.8, CORNEA_Z, 0.002, CORNEA_A, 24), corneaIn = arc(7.2, CORNEA_Z, 0.002, CORNEA_A, 24);
+// Lens: an ellipsoid 9 mm across and 3.8 mm thick, behind the iris.
+const LENS_Z = 7.4, LENS_R = 4.5, LENS_H = 1.9;
+const lensOutline = Array.from({ length: 33 }, (_, i) => { const a = 0.01 + (Math.PI - 0.02) * i / 32; return [LENS_R * Math.sin(a), LENS_Z + LENS_H * Math.cos(a)]; });
+// Iris: a slightly cone-shaped ring, 0.3 mm thick, with the pupil (radius 1.8) in the middle.
+const irisFront = [[1.8, 9.42], [5.75, 9.78]], irisBack = [[1.8, 9.20], [5.75, 9.50]];
+// Ciliary body: a ring on the inside of the wall between the retina's edge (k = 0) and the iris root (k = 1).
+// It bulges inward near the front, and there its surface is pleated (about 70 folds: the ciliary processes).
+const ciliaryAngle = k => ORA + (LIMBUS_IN + 0.02 - ORA) * k;
+const ciliaryBulge = k => 0.3 + 1.9 * smooth((k - 0.35) / 0.37) * (1 - 0.75 * smooth((k - 0.85) / 0.15));
+function ciliaryPoint(k, t, pleats) {
+  const a = ciliaryAngle(k), fold = pleats ? 1 + 0.16 * smooth((k - 0.4) / 0.2) * Math.sin(70 * t) : 1, r = R_SCLERA - ciliaryBulge(k) * fold;
+  return [r * Math.sin(a) * Math.cos(t), r * Math.sin(a) * Math.sin(t), r * Math.cos(a)];
+}
+// A rectus muscle stub: a band lying on the outside of the sclera, starting thin ~6.5 mm behind the cornea's
+// edge and running backward; `around` is where it sits around the axis (0 = right, pi/2 = top, ...).
+function muscle(around) {
+  const NI = 26, NJ = 13;
+  return gridMesh(NI, NJ, (i, j) => {
+    const a = 1.02 + 0.98 * i / (NI - 1), half = 0.27 - 0.07 * i / (NI - 1), b = (j / (NJ - 1) * 2 - 1) * half, t = around + b;
+    const r = R_OUT + 0.02 + (0.08 + 0.34 * smooth((a - 1.02) / 0.3)) * Math.sqrt(Math.max(0, 1 - (b / half) ** 2)) + Math.max(0, a - 1.8) * 1.6;
+    return [r * Math.sin(a) * Math.cos(t), r * Math.sin(a) * Math.sin(t), r * Math.cos(a)];
+  });
+}
+const anatomy = {
+  sclera:  spun(arc(R_OUT, 0, Math.PI - 0.002, LIMBUS_OUT, 72), 96),       // the white outer coat, from the back pole to the cornea's edge
+  cornea:  spun(corneaOut, 72), corneaInner: spun(corneaIn, 72),
+  lens:    spun(lensOutline, 64),
+  iris:    spun([irisBack[1], irisBack[0], irisFront[0], irisFront[1]], 96),
+  ciliary: gridMesh(25, 421, (i, j) => ciliaryPoint(i / 24, j / 420 * 2 * Math.PI, true)),
+  muscles: [0, Math.PI / 2, Math.PI, -Math.PI / 2].map(muscle),
+};
+// Optic nerve: a cylinder leaving ~4.5 mm (about 23 degrees on this wall) to the nose side of the centre.
+// Its cut end shows the nerve tissue, the sheath around it, and the central artery (red) and vein (blue).
+const NERVE_ANGLE = 4.5 / R, NERVE_END = -19;
+function nerve(tilt) {
+  const place = p => tiltY(p, tilt), disc = (r0, r1, z, dx) => spun([[r0, z], [r1, z]], 32, p => place([p[0] + (dx || 0), p[1], p[2]]));
+  return [[spun([[1.85, -R_SCLERA], [1.85, NERVE_END]], 40, place), [0.90, 0.80, 0.52, 1], 0],
+          [disc(1.45, 1.85, NERVE_END), [0.97, 0.94, 0.86, 1], 3], [disc(0.001, 1.45, NERVE_END), [0.93, 0.84, 0.58, 1], 3],
+          [disc(0.001, 0.26, NERVE_END - 0.03, -0.34), [0.85, 0.12, 0.10, 1], 3], [disc(0.001, 0.33, NERVE_END - 0.03, 0.36), [0.20, 0.30, 0.75, 1], 3]];
+}
+const nerves = { "-1": nerve(NERVE_ANGLE), "1": nerve(-NERVE_ANGLE) };
+
+// ---- the cut faces. Where the cut passes through a part, its inside is shown as a flat coloured area.
+// A band between two lines of points, as triangles (a0, b0, a1, b1, ...).
+const band = (a, b) => { const v = []; a.forEach((p, i) => v.push(...p, ...b[i])); return { pos: buf(gl.ARRAY_BUFFER, new Float32Array(v)), n: v.length / 3 }; };
+// Cut face on the plane y = 0 between two outlines (distance from axis, z), on the right (+1) or left (-1) half.
+const faceY = (a, b, side) => band(a.map(p => [side * p[0], 0, p[1]]), b.map(p => [side * p[0], 0, p[1]]));
+// Cut face on the plane z = CUT_Z: half a ring (the top half) between two sphere radii.
+const faceZ = (r0, r1) => { const ring = r => Array.from({ length: 65 }, (_, i) => { const t = Math.PI * i / 64, q = Math.sqrt(r * r - CUT_Z * CUT_Z); return [q * Math.cos(t), q * Math.sin(t), CUT_Z]; }); return band(ring(r0), ring(r1)); };
+const COLOR = { sclera: [0.95, 0.94, 0.90, 1], choroid: [0.50, 0.10, 0.12, 1], retina: [0.96, 0.69, 0.48, 1], ciliary: [0.72, 0.42, 0.36, 1],
+                iris: [0.33, 0.50, 0.64, 1], lens: [0.93, 0.89, 0.70, 1], cornea: [0.72, 0.88, 0.97, 1], muscle: [0.74, 0.36, 0.32, 1] };
+const cutFaces = [];              // [band, colour, 2 = plane y = 0 (clipped behind CUT_Z) or 0 = plane z = CUT_Z]
+for (const side of [1, -1]) {
+  cutFaces.push([faceY(arc(R_OUT, 0, Math.PI - 0.002, LIMBUS_OUT, 72), arc(R_SCLERA, 0, Math.PI - 0.002, LIMBUS_IN, 72), side), COLOR.sclera, 2]);
+  cutFaces.push([faceY(arc(R_SCLERA, 0, Math.PI - 0.002, ORA, 64), arc(R_CHOROID, 0, Math.PI - 0.002, ORA, 64), side), COLOR.choroid, 2]);
+  const ks = Array.from({ length: 25 }, (_, i) => i / 24);
+  cutFaces.push([faceY(ks.map(k => [R_SCLERA * Math.sin(ciliaryAngle(k)), R_SCLERA * Math.cos(ciliaryAngle(k))]), ks.map(k => { const p = ciliaryPoint(k, 0, false); return [p[0], p[2]]; }), side), COLOR.ciliary, 2]);
+  cutFaces.push([faceY(irisFront, irisBack, side), [0.25, 0.33, 0.42, 1], 2]);
+  cutFaces.push([faceY(corneaOut, corneaIn, side), COLOR.cornea, 2]);
+}
+cutFaces.push([band(lensOutline.map(p => [p[0], 0, p[1]]), lensOutline.map(p => [-p[0], 0, p[1]])), [0.97, 0.94, 0.78, 1], 2]);
+cutFaces.push([band(lensOutline.map(p => [p[0] * 0.55, 0.01, LENS_Z + (p[1] - LENS_Z) * 0.55]), lensOutline.map(p => [-p[0] * 0.55, 0.01, LENS_Z + (p[1] - LENS_Z) * 0.55])), [0.99, 0.97, 0.86, 1], 2]);   // the lens's denser core
+cutFaces.push([faceZ(R_OUT, R_SCLERA), mul(COLOR.sclera, 0.93).concat(1), 0], [faceZ(R_SCLERA, R_CHOROID), mul(COLOR.choroid, 0.93).concat(1), 0]);
+// The fluid in front of the lens (aqueous), as a faint blue area on the cut face, between the cornea and the iris / lens.
+const floorZ = q => q < 1.8 ? LENS_Z + LENS_H * Math.sqrt(1 - (q / LENS_R) ** 2) : 9.42 + (q - 1.8) * 0.36 / 3.95;
+const aqueous = [1, -1].map(side => faceY(corneaIn.filter(p => p[0] < 5.4), corneaIn.filter(p => p[0] < 5.4).map(p => [p[0], floorZ(p[0])]), side));
+// Zonular fibres: fine threads from the ciliary body's folds to the rim of the lens (drawn as lines).
+const zonules = [];
+for (let i = 0; i < 140; i++) { const t = i / 140 * 2 * Math.PI, c = Math.cos(t), sn = Math.sin(t);
+  zonules.push([t, [...ciliaryPoint(0.74, t, false), LENS_R * 0.985 * c, LENS_R * 0.985 * sn, LENS_Z + 0.33,  ...ciliaryPoint(0.62, t, false), LENS_R * 0.985 * c, LENS_R * 0.985 * sn, LENS_Z - 0.33]]); }
+
+// The drawn retina depends on the relief slider (its thickness = this scan's median x relief), so it is rebuilt when that changes.
+let retina = null;
+function buildRetina(s) {
+  if (retina) { freeMesh(retina.inner); retina.faces.forEach(f => freeMesh(f[0])); }
+  const n = 72, angles = Array.from({ length: n + 1 }, (_, i) => Math.PI - 0.002 + (ORA - Math.PI + 0.002) * i / n);
+  const inner = angles.map(a => { const r = R - MED * s * retinaTaper(a); return [r * Math.sin(a), r * Math.cos(a)]; });
+  const outer = angles.map(a => [R_CHOROID * Math.sin(a), R_CHOROID * Math.cos(a)]);
+  retina = { s, inner: spun(inner, 96), faces: [[faceY(inner, outer, 1), COLOR.retina, 2], [faceY(inner, outer, -1), COLOR.retina, 2], [faceZ(R_CHOROID, R - MED * s), mul(COLOR.retina, 0.93).concat(1), 0]] };
+}
+let wallMesh = null;                            // built at start when a photo was lined up
+const mesh = { ilm: { depth: buf(gl.ARRAY_BUFFER, ILM.map(v => v / 1000)), slope: buf(gl.ARRAY_BUFFER, slopes(ILM)) },
+               low: { depth: buf(gl.ARRAY_BUFFER, LOW.map(v => v / 1000)), slope: buf(gl.ARRAY_BUFFER, slopes(LOW)) } };
+const bufSlab = gl.createBuffer(), bufLines = gl.createBuffer(), bufSkirt = gl.createBuffer();
+
+function loadImage(url) { return new Promise((ok, fail) => { const im = new Image(); im.onload = () => ok(im); im.onerror = fail; im.src = url; }); }
+function makeTexture(image) {
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return t;
+}
+
+// ---------------------------------------------------------------- state and controls
+const state = { yaw: 0.6, pitch: 0.5, dist: 13, target: [0, 0, 0], dirty: true, sel: 0, probe: null };
+const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn", "texMode", "redMode", "heatThr", "shape", "nerve", "cutOpen", "labelsOn", "shade", "estRelief"]) ui[id] = $(id);
+const curved = () => ui.shape.value !== "0";      // on the ball: scan only, or the textbook eye
+const textbook = () => ui.shape.value === "1";    // the drawn eye around the scan
+const scanOnly = () => ui.shape.value === "2";    // nothing drawn that is not data
+const F = D.fusion || null;                     // the photo (and heat) lined up with this scan, if oct3d.py was given one
+const SPOTS = F ? F.hot_spots : [];
+let photoTex = null, heatTex = null, heatPix = null;
+const heatOn = () => !!heatTex && ui.redMode.value === "1";
+function heatAt(u, v) { if (!heatPix) return 0; const x = Math.min(heatPix.w - 1, Math.max(0, Math.floor(u * heatPix.w))), y = Math.min(heatPix.h - 1, Math.max(0, Math.floor(v * heatPix.h))); return heatPix.data[y * heatPix.w + x] / 255; }
+const redraw = () => { state.dirty = true; };
+const stretch = () => Number(ui.stretch.value);
+const height = depthUm => (D0 - depthUm / 1000) * stretch();          // measured depth -> height in the 3D scene
+const worldOf = (u, v, depthUm) => [(u - 0.5) * W, height(depthUm), (v - 0.5) * L];
+// Eyeball shape: the point of the wall at scan position (u, v), `inward` mm closer to the eye's centre.
+function onWall(u, v, inward) {
+  const lx = (u - 0.5) * W, ly = (v - 0.5) * L, along = Math.hypot(lx, ly), th = along / R, r = R - inward, k = along > 1e-9 ? Math.sin(th) / along : 0;
+  return [lx * k * r, -ly * k * r, -Math.cos(th) * r];
+}
+// A point on the inner surface, lifted `lift` mm toward the inside of the eye, in the shape now shown.
+function surfacePoint(u, v, lift) {
+  return curved() ? onWall(u, v, at(THICK, u, v) / 1000 * stretch() + lift) : add(worldOf(u, v, at(ILM, u, v)), [0, lift, 0]);
+}
+const tMin = Math.min(...THICK), tMax = Math.max(...THICK);
+let enFaceTex = null; const sliceTex = [], sliceImg = [];
+const sliceV = () => (D.slices[Number(ui.slice.value)].scan + 0.5) / D.scans;
+
+function syncOutputs() {
+  ui.thr.nextElementSibling.textContent = fmt(ui.thr.value) + " µm";
+  ui.opacity.nextElementSibling.textContent = fmt(ui.opacity.value * 100) + "%";
+  ui.stretch.nextElementSibling.textContent = fmt(ui.stretch.value, 1) + "x";
+  $("hudRelief").textContent = "Relief " + fmt(ui.stretch.value, 1) + "x" + (stretch() === 1 ? " (true proportions)" : " (thickness drawn " + fmt(ui.stretch.value, 1) + " times too tall)");
+  ui.slice.nextElementSibling.textContent = (D.slices[Number(ui.slice.value)].scan + 1) + " / " + D.scans;
+  ui.heatThr.nextElementSibling.textContent = fmt(ui.heatThr.value * 100) + "%";
+  document.querySelectorAll(".eyeRow").forEach(e => e.style.display = textbook() ? "" : "none");
+  document.querySelectorAll(".scanRow").forEach(e => e.style.display = scanOnly() && wallMesh ? "" : "none");
+  document.querySelectorAll(".flatRow").forEach(e => e.style.display = curved() ? "none" : "");
+  $("hint").textContent = "Drag to turn · wheel or pinch to zoom · click the " + (curved() ? "scanned patch" : "surface") + " to measure a spot";
+  const lb = $("labelButton"); if (lb) lb.textContent = ui.labelsOn.checked ? "Hide names" : "Show names";
+  $("legendText").textContent = heatOn() ? (D.estimate ? "points of interest in the photo: weak → strong" : "model evidence (from the photo): weak → strong") : ui.redMode.value === "0" ? `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm` : "no tint: the data's own colours";
+  $("legend").querySelector("i").style.display = ui.redMode.value === "-1" ? "none" : "";
+  if (scanOnly()) $("hudRelief").textContent += " · grid: 1 mm squares along the wall" + (ui.estRelief.checked && wallMesh ? " · photo relief is GUESSED, not measured" : "");
+}
+for (const id in ui) ui[id].addEventListener("input", () => { if (id === "shape") { shapeDefaults(); buildViews(); setView(scanOnly() ? "scan" : textbook() ? "eye" : "three"); } if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); drawBscan(); redraw(); });
+// What each shape starts with: scan only = no tint, no lighting, no pins (only data); the others = as before.
+function shapeDefaults() {
+  const plain = scanOnly();
+  ui.redMode.value = plain ? "-1" : heatTex ? "1" : "0"; ui.shade.checked = !plain; ui.pinsOn.checked = !plain;
+  if (D.estimate && (SPOTS.length || D.findings.length)) {   // an estimate with something to point at: pins on, heat tinted
+    ui.pinsOn.checked = true;
+    if (SPOTS.length && heatTex) ui.redMode.value = "1";
+  }
+  $("pins").style.display = ui.pinsOn.checked ? "" : "none";
+}
+for (const [id, value] of [["relief1", 1], ["relief5", 5]]) $(id).onclick = () => { ui.stretch.value = value; syncOutputs(); redraw(); };
+
+// ---------------------------------------------------------------- side panel
+// A page from photo2oct.py carries D.estimate: the "scan" was GUESSED from a photo. Then every text that says
+// "measured" or "raw data" would be a lie, so it is replaced, once, and a banner stays on the picture.
+let estimateShown = false;
+function showEstimate() {
+  const E = D.estimate;
+  if (!E || estimateShown) return;
+  estimateShown = true;
+  const a = E.assumed, how = E.method === "network" ? "a trained network's guess" : "the average healthy eye, not this eye";
+  ui.redMode.options[1].textContent = "Points of interest (from the photo)";
+  ui.redMode.options[2].textContent = "Retina thickness (estimated)";
+  $("estBanner").style.display = "";
+  $("estBanner").textContent = `ESTIMATED from a photo (${how}) · not a scan · not a measurement`;
+  document.querySelector("#side h1").textContent = "Estimated OCT view";
+  document.title = "Estimated OCT view";
+  document.querySelectorAll("#side h2").forEach(h => {
+    if (h.textContent.startsWith("Photo lined up")) h.textContent = "Where the estimate sits in the photo";
+    if (h.textContent.startsWith("Model hot spots")) h.textContent = "Points of interest (from the photo)";
+    if (h.textContent.startsWith("Thickened areas")) h.textContent = "Thicker than the average eye (ESTIMATED, not measured)";
+    if (h.textContent.startsWith("B-scan")) h.textContent = "B-scan (DRAWN from the estimate, not data)";
+    if (h.textContent.startsWith("What this is")) {
+      for (let n = h.nextElementSibling; n; n = n.nextElementSibling) if (n.classList.contains("note")) n.style.display = "none";
+      const d = document.createElement("div");
+      d.className = "note";
+      d.innerHTML = `<strong>Nothing on this page was measured.</strong> A photo is flat and holds no depth. The thickness shown is ${E.basis} ` +
+        `<br><br><strong>From the photo:</strong> its own colours, and WHERE the map sits (optic disc and fovea found ${E.landmarks_typed ? "by hand" : "by a classical filter"}; check the picture above: circle = disc, cross = fovea, square = the estimated ${fmt(a.field_mm)} x ${fmt(a.field_mm)} mm). ` +
+        `<br><br><strong>Assumed:</strong> disc to fovea = ${fmt(a.disc_fovea_mm, 1)} mm (sets every mm here; the photo's width is then ${fmt(a.photo_width_mm, 1)} mm); the eye wall under the retina is ${a.eye_wall}; the curve of the shell. ` +
+        `<br><br><strong>The B-scans are drawings:</strong> layers ${a.layers}. The dark stripes are placed under the photo's vessels. Do not read layers, fluid or any finding off them.` +
+        `<br><br><strong>Points of interest</strong> (yellow letters) come from the PHOTO: ${E.points_source}. The thickness quoted under each is the estimate at that place, not a measurement.` +
+        `<br><br>Only a real OCT scan can show this eye's thickness. This is a teaching picture, not a diagnosis.`;
+      h.after(d);
+    }
+  });
+}
+
+function renderSide() {
+  const t = D.thickness_um, s = D.spacing_um;
+  $("source").textContent = D.source;
+  $("facts").innerHTML =
+    `<dt>Scan</dt><dd>${D.scans} B-scans of ${D.width_px} x ${D.depth_px} px</dd>` +
+    `<dt>Covers</dt><dd>${fmt(W, 1)} x ${fmt(L, 1)} mm, ${fmt(DEPTH, 1)} mm deep${D.spacing_assumed ? " <span class='tag'>assumed</span>" : ""}</dd>` +
+    `<dt>One pixel</dt><dd>${fmt(s.dx, 1)} µm wide, ${fmt(s.dz, 1)} µm deep; scans ${fmt(s.dy)} µm apart</dd>` +
+    `<dt>Thickness</dt><dd>median ${fmt(t.median)} µm · thinnest ${fmt(t.min)} · thickest ${fmt(t.max)}</dd>` +
+    `<dt>Centre (1 mm)</dt><dd>${fmt(t.central_1mm)} µm <span style="color:var(--dim)">(if the scan is centred on the fovea)</span></dd>`;
+  $("spacingNote").innerHTML = D.spacing_assumed ? "<strong>The scan's size in mm was not in the data</strong>: it was typed in or left at the default, so every mm and µm here depends on that being right." : "";
+  const dc = D.device_check;
+  $("deviceNote").textContent = dc ? "Against the device's own lines in this file, ours are on average " +
+    Object.entries(dc).map(([k, v]) => `${fmt(v.mean_abs_um)} µm away (${k === "ilm" ? "inner surface" : "lower surface vs Bruch's membrane"})`).join(" and ") + "." : "";
+  const box = $("findings");
+  box.innerHTML = D.findings.length ? "" : `<div class='note'>Nothing above ${fmt(D.threshold_um)} µm.</div>`;
+  D.findings.forEach(f => {
+    const d = document.createElement("div");
+    d.className = "finding" + (f.id === state.sel ? " sel" : "");
+    d.innerHTML = (D.estimate ? `<b>#${f.id}</b> · estimated ${fmt(f.peak_um)} µm, ${fmt(f.excess_um)} µm above the average eye · ${fmt(f.area_mm2, 2)} mm²<small>${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of the fovea</small>` :
+      `<b>#${f.id}</b> · up to ${fmt(f.peak_um)} µm thick · ${fmt(f.area_mm2, 2)} mm²` +
+      `<small>${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1} · extra volume ${fmt(f.extra_volume_mm3, 3)} mm³ above ${fmt(D.threshold_um)} µm</small>`);
+    d.onclick = () => selectFinding(f.id);
+    box.appendChild(d);
+  });
+  if (F) {
+    const r = F.registration;
+    $("fusionBox").style.display = ""; $("regCheck").src = F.registration_check;
+    $("regText").innerHTML = `<span class="tag ${r.trusted ? "good" : "bad"}">${r.trusted ? "match trusted" : "MATCH NOT TRUSTED"}</span> ` +
+      `Vessel fit ${fmt(r.ncc, 2)} (1 = perfect); wrong maps reach ${fmt(r.control, 2)} by chance, so the real fit is ${fmt(r.ratio, 1)}x the control (needs ${fmt(r.min_ratio, 1)}x). ` +
+      `Photo turned ${fmt(r.angle)}°, its width covers ${fmt(r.photo_mm_per_width, 1)} mm. Left: where the scan lies in the photo. Right: tiles of photo and scan; vessels should run unbroken across tile edges.` +
+      (r.trusted ? "" : " <strong>The photo may not belong to this scan: do not rely on anything the photo adds here.</strong>");
+    showEstimate();
+    if (D.estimate) $("regText").innerHTML = `<span class="tag bad">estimated</span> The square is placed on the fovea by construction (no vessel matching was needed or done).`;
+    const hb = $("hotspots");
+    hb.innerHTML = F.heat_source ? (SPOTS.length ? "" : `<div class='note'>${D.estimate ? "Nothing in the square stands out enough to mark. That is not a statement that the eye is healthy." : "No hot spot of the heat map falls inside the scanned square."}</div>`) : "<div class='note'>No heat map was given (--heat).</div>";
+    SPOTS.forEach(f => {
+      const d = document.createElement("div"), diff = f.thickness_um - D.thickness_um.median;
+      d.className = "finding" + (f.id === state.sel ? " sel" : "");
+      d.innerHTML = `<b style="color:#ffd84d">${f.id}</b> · ${D.estimate ? "stands out" : "heat"} ${fmt(f.peak_heat * 100)}% · retina under it ${fmt(f.thickness_um)} µm${D.estimate ? " (estimated)" : ""}` +
+        `<small>${diff >= 0 ? "+" : ""}${fmt(diff)} µm vs ${D.estimate ? "the estimate's" : "this scan's"} median · up to ${fmt(f.thickness_max_um)} µm · ${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1}</small>`;
+      d.onclick = () => selectFinding(f.id);
+      hb.appendChild(d);
+    });
+    $("aiNote").innerHTML = F.heat_source ? `<strong>The model's heat was computed on the flat photo</strong> and carried here by the alignment: the model did not look at the depth. Alignment is good to about a vessel's width. Heat source: ${F.heat_source}.`
+      : "<strong>Photo only, no heat map.</strong> The photo is laid on the surface by the alignment; no model findings were given (--heat).";
+  }
+  const pins = $("pins"); pins.innerHTML = "";
+  SPOTS.forEach(f => { const d = document.createElement("div"); d.className = "pin spot" + (f.id === state.sel ? " sel" : ""); d.textContent = f.id; d.dataset.id = f.id; d.onclick = () => selectFinding(f.id); pins.appendChild(d); });
+  D.findings.forEach(f => { const d = document.createElement("div"); d.className = "pin" + (f.id === state.sel ? " sel" : ""); d.textContent = f.id; d.dataset.id = f.id; d.onclick = () => selectFinding(f.id); pins.appendChild(d); });
+}
+function nearestSlice(scan) { let best = 0; D.slices.forEach((s, i) => { if (Math.abs(s.scan - scan) < Math.abs(D.slices[best].scan - scan)) best = i; }); return best; }
+function selectFinding(id) {
+  state.sel = id; const f = D.findings.concat(SPOTS).find(f => f.id === id);
+  ui.slice.value = nearestSlice(f.scan); state.probe = { u: f.u, v: f.v };
+  flyTo(curved() ? { target: surfacePoint(f.u, f.v, 0), dist: 7, yaw: 0.25, pitch: 0.2 } : { target: surfacePoint(f.u, f.v, 0), dist: 7, yaw: 0.5, pitch: 0.6 });
+  renderSide(); syncOutputs(); drawBscan(); redraw();
+}
+
+// ---------------------------------------------------------------- the 2-D B-scan with the found lines
+function drawBscan() {
+  const i = Number(ui.slice.value), img = sliceImg[i]; if (!img) return;
+  const c = $("bscan"), ctx = c.getContext("2d"), w = 680, h = Math.round(w * img.height / img.width);
+  c.width = w; c.height = h; ctx.drawImage(img, 0, 0, w, h);
+  const v = sliceV();
+  for (const [grid, color] of [[ILM, "#59c8ff"], [LOW, "#ffd84d"]]) {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
+    for (let x = 0; x <= w; x += 4) { const y = at(grid, x / w, v) / 1000 / DEPTH * h; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  }
+  if (state.probe && Math.abs(state.probe.v - v) < 0.6 / D.scans + 1e-6) {   // the clicked spot, if it lies on this scan
+    const x = state.probe.u * w; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+// ---------------------------------------------------------------- camera
+function camera() {
+  const cp = Math.cos(state.pitch), offset = [cp * Math.sin(state.yaw), Math.sin(state.pitch), cp * Math.cos(state.yaw)];
+  const eye = add(state.target, mul(offset, state.dist)), fwd = norm(sub(state.target, eye));
+  const right = norm(cross(fwd, [0, 1, 0])), up = cross(right, fwd);
+  const aspect = canvas.width / canvas.height, fov = 40 * Math.PI / 180;
+  return { eye, fwd, right, up, aspect, fov, mvp: matMul(perspective(fov, aspect, Math.max(0.05, state.dist * 0.02), 300), lookAt(eye, right, up, fwd)) };
+}
+const far = Math.max(W, L) * 2.1;
+const VIEWS = { three: { target: [0, 0, 0], dist: far, yaw: 0.6, pitch: 0.5 }, top: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 1.5 },
+                front: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 0.12 },
+                // eyeball shape: the cut-open eye from the front and above; the patch from just inside; the front; the cut face from above
+                eye: { target: [0, 0, 0.5], dist: 60, yaw: 0.72, pitch: 0.5 }, patch: { target: [0, 0, -R + 0.5], dist: 8, yaw: 0.3, pitch: -0.75 },
+                scan: { target: [0, 0, -R + 1.5], dist: 25, yaw: 0.5, pitch: 0.3 }, scanEdge: { target: [0, 0, -R + 1.5], dist: 25, yaw: 1.3, pitch: 0.12 },
+                frontEye: { target: [0, 0, 2], dist: 60, yaw: 0, pitch: 0.24 }, section: { target: [0, 0, 0.5], dist: 60, yaw: -1.5708, pitch: 1.5 } };
+const VIEW_NAMES = { three: "3/4 view", top: "From above", front: "From the front", scan: "Whole scan", scanEdge: "From the side", eye: "Full cutaway", patch: "Zoom to OCT patch", frontEye: "Front view", section: "Section from above" };
+let flight = null, viewNow = "eye";
+function setView(name, glide) {
+  viewNow = name; const goal = JSON.parse(JSON.stringify(VIEWS[name]));
+  if (glide) flyTo(goal); else { flight = null; Object.assign(state, goal); }
+  document.querySelectorAll("#views button").forEach(b => b.style.borderColor = b.dataset.view === name ? "var(--accent)" : "");
+  redraw();
+}
+function buildViews() {         // the buttons over the picture, for the shape now shown
+  const box = $("views"); box.innerHTML = "";
+  for (const name of scanOnly() ? ["scan", "patch", "scanEdge"] : textbook() ? ["eye", "patch", "frontEye", "section"] : ["three", "top", "front"]) {
+    const b = document.createElement("button"); b.dataset.view = name; b.textContent = VIEW_NAMES[name];
+    b.onclick = () => setView(name, curved());                   // in the eyeball, glide between the whole eye and the patch
+    box.appendChild(b);
+  }
+  if (textbook()) {             // one more button: part names on / off
+    const b = document.createElement("button"); b.id = "labelButton"; b.onclick = () => { ui.labelsOn.checked = !ui.labelsOn.checked; syncOutputs(); redraw(); };
+    box.appendChild(b); syncOutputs();
+  }
+}
+function flyTo(goal) {
+  const from = { target: state.target.slice(), dist: state.dist, yaw: state.yaw, pitch: state.pitch }, t0 = performance.now();
+  let dyaw = goal.yaw - from.yaw; dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));
+  flight = now => {
+    const t = Math.min(1, (now - t0) / 500), s = t * t * (3 - 2 * t);
+    state.target = add(from.target, mul(sub(goal.target, from.target), s));
+    state.dist = from.dist + (goal.dist - from.dist) * s; state.yaw = from.yaw + dyaw * s; state.pitch = from.pitch + (goal.pitch - from.pitch) * s;
+    if (t >= 1) flight = null; redraw();
+  };
+}
+
+// ---------------------------------------------------------------- clicking: walk along the ray until it dips below the surface
+function pick(clientX, clientY) {
+  const box = canvas.getBoundingClientRect(), cam = camera(), k = Math.tan(cam.fov / 2);
+  const nx = (clientX - box.left) / box.width * 2 - 1, ny = 1 - (clientY - box.top) / box.height * 2;
+  const dir = norm(add(cam.fwd, add(mul(cam.right, nx * k * cam.aspect), mul(cam.up, ny * k))));
+  const cutV = ui.cut.checked && ui.showSlice.checked ? sliceV() : 2;
+  if (curved()) {               // eyeball: turn each point of the ray back into a position on the wall, then compare radii
+    for (let t = 0.1; t < state.dist + 2 * R + 5; t += 0.01) {
+      const p = add(cam.eye, mul(dir, t)), r = Math.hypot(p[0], p[1], p[2]);
+      if (textbook() && r > R_SCLERA && r < R_OUT && !(ui.cutOpen.checked && p[1] > 0 && p[2] > CUT_Z)) return null;   // the ray meets the eye's wall first
+      if (r < R - 4 || r > R + 0.5 || p[2] > 0) continue;
+      const side = Math.hypot(p[0], p[1]), along = Math.acos(Math.max(-1, Math.min(1, -p[2] / r))) * R, k = side > 1e-9 ? along / side : 0;
+      const u = p[0] * k / W + 0.5, v = -p[1] * k / L + 0.5;
+      if (u < 0 || u > 1 || v < 0 || v > 1 || v > cutV) continue;
+      if (r >= R - at(THICK, u, v) / 1000 * stretch()) return { u, v };
+    }
+    return null;
+  }
+  for (let t = 0.1; t < state.dist * 3 + 20; t += 0.01) {
+    const p = add(cam.eye, mul(dir, t)), u = p[0] / W + 0.5, v = p[2] / L + 0.5;
+    if (u < 0 || u > 1 || v < 0 || v > 1 || v > cutV) continue;
+    if (p[1] <= height(at(ILM, u, v))) return { u, v };
+  }
+  return null;
+}
+function probe(hit) {
+  const box = $("probe"); state.probe = hit;
+  if (!hit) { box.textContent = "That is not on the scanned surface."; drawBscan(); return; }
+  const th = at(THICK, hit.u, hit.v), x = (hit.u - 0.5) * W, z = (hit.v - 0.5) * L, scan = Math.min(D.scans - 1, Math.floor(hit.v * D.scans));
+  ui.slice.value = nearestSlice(scan);
+  box.innerHTML = `<strong>Retina thickness here: ${fmt(th)} µm</strong> (median of this scan: ${fmt(D.thickness_um.median)} µm).<br>` +
+    `${fmt(Math.abs(x), 2)} mm ${x >= 0 ? "right" : "left"} of the centre, ${fmt(Math.abs(z), 2)} mm ${z >= 0 ? "toward the last" : "toward the first"} scan (B-scan ${scan + 1}). ` +
+    `Inner surface ${fmt(at(ILM, hit.u, hit.v))} µm below the top of the scan.` +
+    (heatPix ? ` <strong>Model heat here: ${fmt(heatAt(hit.u, hit.v) * 100)}%</strong> of the photo's strongest spot.` : "");
+  syncOutputs(); drawBscan(); redraw();
+}
+
+// ---------------------------------------------------------------- mouse / touch
+const pointers = new Map(); let moved = 0, pinch = 0;
+canvas.addEventListener("pointerdown", e => { canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]); moved = 0; pinch = 0; canvas.classList.add("drag"); });
+canvas.addEventListener("pointermove", e => {
+  const last = pointers.get(e.pointerId); if (!last) return;
+  const dx = e.clientX - last[0], dy = e.clientY - last[1];
+  pointers.set(e.pointerId, [e.clientX, e.clientY]); moved += Math.abs(dx) + Math.abs(dy);
+  if (pointers.size === 2) { const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) state.dist = Math.min(140, Math.max(1, state.dist * pinch / d)); pinch = d; }
+  else { flight = null; state.yaw -= dx * 0.006; state.pitch = Math.max(curved() ? -1.5 : -0.2, Math.min(1.55, state.pitch + dy * 0.006)); }
+  redraw();
+});
+const release = e => { if (pointers.delete(e.pointerId) && e.type === "pointerup" && moved < 5 && pointers.size === 0) probe(pick(e.clientX, e.clientY)); if (!pointers.size) canvas.classList.remove("drag"); };
+canvas.addEventListener("pointerup", release); canvas.addEventListener("pointercancel", release);
+canvas.addEventListener("wheel", e => { e.preventDefault(); flight = null; state.dist = Math.min(140, Math.max(1, state.dist * Math.exp(e.deltaY * 0.0012))); redraw(); }, { passive: false });
+
+// ---------------------------------------------------------------- drawing one frame
+// Switch to a shader program. The per-corner data lists (attributes) of the previous program are switched off
+// first: one left on by mistake, pointing at a shorter list, would stop the next draw.
+function begin(prog) { gl.useProgram(prog); for (let i = 0; i < 8; i++) gl.disableVertexAttribArray(i); }
+// One drawn part of the eye. o: clip (see the shader), style, hole (leave the patch's place open), strip (a band, without normals).
+function drawSolid(m, color, o, cam) {
+  begin(solid);
+  const U = n => gl.getUniformLocation(solid, n), aPos = gl.getAttribLocation(solid, "aPos"), aNor = gl.getAttribLocation(solid, "aNormal");
+  gl.uniformMatrix4fv(U("uMVP"), false, cam.mvp); gl.uniform3fv(U("uEye"), cam.eye); gl.uniform4fv(U("uColor"), color);
+  gl.uniform1i(U("uClip"), o.clip || 0); gl.uniform1i(U("uStyle"), o.style || 0); gl.uniform1f(U("uCutZ"), CUT_Z);
+  gl.uniform1i(U("uHole"), o.hole ? 1 : 0); gl.uniform1f(U("uR"), R); gl.uniform2f(U("uHalf"), W / 2, L / 2);
+  gl.bindBuffer(gl.ARRAY_BUFFER, m.pos); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+  if (m.nor) { gl.bindBuffer(gl.ARRAY_BUFFER, m.nor); gl.enableVertexAttribArray(aNor); gl.vertexAttribPointer(aNor, 3, gl.FLOAT, false, 0, 0); }
+  else if (aNor >= 0) gl.vertexAttrib3f(aNor, 0, 1, 0);
+  if (m.idx) { gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, m.idx); gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0); }
+  else gl.drawArrays(o.triangles ? gl.TRIANGLES : gl.TRIANGLE_STRIP, 0, m.n);
+}
+// The side walls around the patch (eyeball shape), so no gap shows where the measured patch meets the drawn retina:
+// the cut edge of the drawn retina all round, and the patch's own edge from the wall up to its inner surface.
+function patchWalls(s, cutV) {
+  const tri = [], K = 48, vMax = Math.min(1, cutV);
+  const side = (u0, v0, u1, v1, heightAt) => { for (let i = 0; i < K; i++) {
+    const q = [i / K, (i + 1) / K].map(t => { const u = u0 + (u1 - u0) * t, v = v0 + (v1 - v0) * t; return [onWall(u, v, 0), onWall(u, v, heightAt(u, v))]; });
+    tri.push(...q[0][0], ...q[0][1], ...q[1][0],  ...q[1][0], ...q[0][1], ...q[1][1]); } };
+  const drawn = () => MED * s, measured = (u, v) => at(THICK, u, v) / 1000 * s;
+  side(0, 0, 1, 0, drawn); side(1, 0, 1, 1, drawn); side(1, 1, 0, 1, drawn); side(0, 1, 0, 0, drawn);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufSkirt); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tri), gl.DYNAMIC_DRAW);
+  return { pos: bufSkirt, n: tri.length / 3 };
+}
+
+// The patch's own cut edges (on the ball): each shows the OCT's real cross-section there. The first and last edge are
+// B-scans; the left and right edges are built from the first / last column of every embedded B-scan (edgeTex).
+let edgeTex = null;
+function drawPatchEdges(s, cutV, cam) {
+  if (!edgeTex) return;
+  const vMax = Math.min(1, cutV), first = D.slices[0].scan, last = D.slices[D.slices.length - 1].scan, n = D.slices.length;
+  const acrossScans = v => ((Math.min(Math.max(v * D.scans - 0.5, first), last) - first) / Math.max(1, last - first) * (n - 1) + 0.5) / n;
+  const sides = [[0, 0, 1, 0, sliceTex[0], u => u], [0, 0, 0, vMax, edgeTex[0], (u, v) => acrossScans(v)], [1, 0, 1, vMax, edgeTex[1], (u, v) => acrossScans(v)]];
+  if (cutV >= 1) sides.push([0, 1, 1, 1, sliceTex[n - 1], u => u]);
+  begin(slab);
+  const aPos = gl.getAttribLocation(slab, "aPos"), aTex = gl.getAttribLocation(slab, "aTex"), N = 96;
+  gl.uniformMatrix4fv(gl.getUniformLocation(slab, "uMVP"), false, cam.mvp); gl.uniform1i(gl.getUniformLocation(slab, "uScan"), 0); gl.activeTexture(gl.TEXTURE0);
+  for (const [u0, v0, u1, v1, tex, along] of sides) {
+    const strip = [];
+    for (let i = 0; i <= N; i++) {
+      const u = u0 + (u1 - u0) * i / N, v = v0 + (v1 - v0) * i / N, x = along(u, v);
+      const dTop = Math.max(0, at(ILM, u, v) / 1000 - 0.04), low = at(LOW, u, v) / 1000, dBottom = Math.min(DEPTH, low + (R_CHOROID - R) / s);
+      strip.push(...onWall(u, v, (low - dTop) * s), x, dTop / DEPTH,  ...onWall(u, v, R - R_CHOROID), x, dBottom / DEPTH);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufSlab); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(strip), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 20, 12);
+    gl.bindTexture(gl.TEXTURE_2D, tex); gl.drawArrays(gl.TRIANGLE_STRIP, 0, strip.length / 5);
+  }
+}
+// Scan only: the photo's rim, given the thickness the photo is drawn at. Plain grey: nothing was measured there.
+let rimMesh = null;
+function photoRim(s) {
+  if (rimMesh && rimMesh.s === s) return rimMesh;
+  if (rimMesh) gl.deleteBuffer(rimMesh.pos);
+  const m = F.registration.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0], a = [], b = [];
+  for (let i = 0; i <= 180; i++) {
+    const t = i / 180 * 2 * Math.PI, dx = 0.5 + 0.485 * Math.cos(t) - m[0][2], dy = 0.5 + 0.485 * Math.sin(t) - m[1][2];
+    const u = (m[1][1] * dx - m[0][1] * dy) / det, v = (-m[1][0] * dx + m[0][0] * dy) / det;
+    a.push(onWall(u, v, MED * s + 0.03)); b.push(onWall(u, v, 0));
+  }
+  rimMesh = band(a, b); rimMesh.s = s; return rimMesh;
+}
+// Scan only: a faint grid on the wall, one line per millimetre measured along the wall, out to 8 mm from the centre.
+const gridLines = [];
+for (let k = -8; k <= 8; k++) for (const swap of [false, true]) {
+  const reach = Math.sqrt(8.5 * 8.5 - k * k);
+  for (let i = 0; i < 40; i++) for (const t of [i / 40, (i + 1) / 40]) {
+    const along = -reach + 2 * reach * t, lx = swap ? along : k, ly = swap ? k : along;
+    gridLines.push(...onWall(lx / W + 0.5, ly / L + 0.5, -0.13));
+  }
+}
+
+// ---------------------------------------------------------------- part names with leader lines (textbook eye)
+// Each name knows the 3-D point it belongs to. `inside` = only visible when the eye is cut open.
+const ringPoint = (r, t) => { const q = Math.sqrt(r * r - CUT_Z * CUT_Z); return [q * Math.cos(t), q * Math.sin(t), CUT_Z]; };
+const wallAt = (r, a, side) => [side * r * Math.sin(a), 0, r * Math.cos(a)];        // a point on the cut face y = 0
+// at(relief) gives one or more candidate points; the first one that can be seen gets the name.
+// closed = candidates when the eye is not cut open (missing: the part cannot be seen then).
+const PARTS = [
+  { text: "Cornea", at: () => [[3.4, 0, CORNEA_Z + Math.sqrt(7.5 * 7.5 - 3.4 * 3.4)], [-3.4, 0, CORNEA_Z + Math.sqrt(7.5 * 7.5 - 3.4 * 3.4)]], closed: () => [[0, -4.6, CORNEA_Z + Math.sqrt(7.8 * 7.8 - 4.6 * 4.6)]] },
+  { text: "Anterior chamber", at: () => [[1.2, 0, 11.0]] },
+  { text: "Iris", at: () => [[3.9, 0, 9.55], [-3.9, 0, 9.55], [0, -3.6, 9.75]], closed: () => [[3.2, -2.2, 9.75], [-3.2, -2.2, 9.75]] },
+  { text: "Pupil", at: () => [], closed: () => [[0, -0.3, 9.4]] },
+  { text: "Lens", at: () => [[-0.6, 0, LENS_Z]] },
+  { text: "Ciliary body and zonules", at: () => [1, -1].map(side => { const q = ciliaryPoint(0.7, 0, false); return [side * (q[0] + 0.5), 0, q[2] + 0.4]; }) },
+  { text: "Sclera", at: () => [ringPoint((R_OUT + R_SCLERA) / 2, 2.25), wallAt((R_OUT + R_SCLERA) / 2, 1.2, 1), wallAt((R_OUT + R_SCLERA) / 2, 1.2, -1)], closed: () => [[-R_OUT * 0.8, R_OUT * 0.3, R_OUT * 0.52], [R_OUT * 0.5, -R_OUT * 0.62, R_OUT * 0.6]] },
+  { text: "Choroid", at: () => [ringPoint((R_SCLERA + R_CHOROID) / 2, 1.95), wallAt((R_SCLERA + R_CHOROID) / 2, 1.33, 1), wallAt((R_SCLERA + R_CHOROID) / 2, 1.33, -1)] },
+  { text: "Retina", at: s => [ringPoint((R_CHOROID + R - MED * s) / 2, 1.62), wallAt((R_CHOROID + R - MED * s * retinaTaper(1.46)) / 2, 1.46, 1), wallAt((R_CHOROID + R - MED * s * retinaTaper(1.46)) / 2, 1.46, -1)] },
+  { text: "Macula / OCT scan", at: s => [onWall(0.5, 0.5, MED * s)], always: true },
+  { text: "Optic nerve", nerve: true, at: s => { const tilt = -Number(ui.nerve.value) * NERVE_ANGLE; return [tiltY([0, 0, NERVE_END + 2.5], tilt).map((v, i) => v + (i === 1 ? 1.85 : 0)), tiltY([0, 0, -(R - MED * s - 0.05)], tilt)]; },
+    closed: () => [tiltY([0, 1.85, NERVE_END + 2.5], -Number(ui.nerve.value) * NERVE_ANGLE)] },
+  { text: "Rectus muscle", at: () => [0, Math.PI, Math.PI / 2, -Math.PI / 2].map(around => { const a = 1.62, t = around - 0.1, r = R_OUT + 0.45; return [r * Math.sin(a) * Math.cos(t), r * Math.sin(a) * Math.sin(t), r * Math.cos(a)]; }) },
+];
+PARTS.forEach(q => { if (!q.closed) q.closed = q.at; });
+// Can the camera see this point, or is the eye's wall in the way? Walk from the point toward the camera
+// and stop if a step lands inside the wall (which is missing in the cut-away quarter, and in front where the clear cornea is).
+function hiddenByWall(cam, p, s) {
+  if (!textbook()) return false;                               // no drawn wall in the other shapes
+  const dir = norm(sub(cam.eye, p)), reach = Math.hypot(...sub(cam.eye, p)), open = ui.cutOpen.checked;
+  for (let t = 0.45; t < Math.min(reach, 40); t += 0.2) {
+    const q = add(p, mul(dir, t)), r = Math.hypot(q[0], q[1], q[2]);
+    if (r > R_OUT + 0.05 && dot(q, dir) > 0) return false;                // outside the eye and moving away from it
+    if (r < R_OUT && r > R - MED * s && q[2] < 10.3 && !(open && q[1] > 0 && q[2] > CUT_Z)) return true;
+  }
+  return false;
+}
+PARTS.forEach(p => { p.el = document.createElement("div"); p.el.className = "lab"; p.el.textContent = p.text; p.el.style.display = "none"; $("labels").appendChild(p.el); });
+function toScreen(cam, p) {     // a 3-D point -> pixels on the picture (null if behind the camera or outside the picture)
+  const m = cam.mvp, x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], wc = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+  if (wc < 0.05 || Math.abs(x / wc) > 0.98 || Math.abs(y / wc) > 0.98) return null;
+  return [(x / wc * 0.5 + 0.5) * canvas.clientWidth, (0.5 - y / wc * 0.5) * canvas.clientHeight];
+}
+function layoutLabels(cam) {
+  const svg = $("leaders"), cw = canvas.clientWidth, ch = canvas.clientHeight, s = stretch(), open = ui.cutOpen.checked;
+  const insideEye = Math.hypot(...cam.eye) < R_OUT;            // the camera is inside the eye (zoomed to the patch)
+  const shown = [];
+  for (const p of PARTS) {
+    p.el.style.display = "none";
+    if (!textbook() || !ui.labelsOn.checked) continue;
+    if (insideEye ? !p.always : p.nerve && ui.nerve.value === "0") continue;
+    for (const point of (open ? p.at : p.closed)(s)) {         // the first candidate point that is in the picture and not behind the wall
+      const xy = toScreen(cam, point); if (!xy || hiddenByWall(cam, point, s)) continue;
+      shown.push({ p, x: xy[0], y: xy[1] }); break;
+    }
+  }
+  // Names go in two columns, left and right of the eye, each sorted from top to bottom and pushed apart
+  // so that no two overlap; a straight line joins each name to its part.
+  const mid = (toScreen(cam, [0, 0, 0]) || [cw / 2])[0], GAP = 25, TOP = 64, BOTTOM = ch - 58;
+  let out = "";
+  for (const left of [true, false]) {
+    const col = shown.filter(o => (o.x < mid) === left).sort((a, b) => a.y - b.y); if (!col.length) continue;
+    col.forEach(o => { o.p.el.style.display = ""; });
+    const widest = Math.max(...col.map(o => o.p.el.offsetWidth)) + 10;     // room the longest name needs, so none runs off the picture
+    const edge = left ? Math.max(widest, Math.min(...col.map(o => o.x)) - 46) : Math.min(cw - widest, Math.max(...col.map(o => o.x)) + 46);
+    col.forEach((o, i) => { o.ly = Math.max(i ? col[i - 1].ly + GAP : TOP, o.y); });
+    for (let i = col.length - 1; i >= 0; i--) col[i].ly = Math.min(col[i].ly, i === col.length - 1 ? BOTTOM : col[i + 1].ly - GAP);
+    for (const o of col) {
+      const el = o.p.el; el.style.display = ""; el.style.top = o.ly + "px";
+      if (left) { el.style.left = ""; el.style.right = (cw - edge) + "px"; } else { el.style.right = ""; el.style.left = edge + "px"; }
+      out += `<line x1="${fmt(o.x, 1)}" y1="${fmt(o.y, 1)}" x2="${fmt(edge + (left ? 3 : -3), 1)}" y2="${fmt(o.ly, 1)}"/><circle cx="${fmt(o.x, 1)}" cy="${fmt(o.y, 1)}" r="2.6"/>`;
+    }
+  }
+  svg.innerHTML = out;
+}
+
+function drawSurface(m, lower, cam) {
+  begin(surface);
+  const U = n => gl.getUniformLocation(surface, n), A = (n, b, size) => { const loc = gl.getAttribLocation(surface, n); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0); };
+  A("aUV", bufUV, 2); A("aDepth", m.depth, 1); A("aSlope", m.slope, 2); A("aThick", bufThick, 1); A("aThickSlope", bufThickSlope, 2);
+  gl.uniform1i(U("uCurved"), curved() ? 1 : 0); gl.uniform1f(U("uR"), R);
+  gl.uniformMatrix4fv(U("uMVP"), false, cam.mvp); gl.uniform3f(U("uSize"), W, L, D0); gl.uniform1f(U("uStretch"), stretch());
+  gl.uniform1f(U("uThr"), Number(ui.thr.value)); gl.uniform1f(U("uMax"), tMax); gl.uniform1f(U("uOpacity"), Number(ui.opacity.value));
+  gl.uniform1i(U("uLower"), lower ? 1 : 0); gl.uniform1i(U("uCut"), ui.cut.checked && ui.showSlice.checked && !(lower && curved()) ? 1 : 0); gl.uniform1f(U("uCutV"), sliceV() + 0.25 / D.scans);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, enFaceTex); gl.uniform1i(U("uEnFace"), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, photoTex || enFaceTex); gl.uniform1i(U("uPhoto"), 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, heatTex || enFaceTex); gl.uniform1i(U("uHeat"), 2);
+  gl.uniform1i(U("uTexMode"), ui.texMode.value === "2" ? 2 : photoTex && ui.texMode.value === "1" ? 1 : 0);
+  gl.uniform1i(U("uRedMode"), heatOn() ? 1 : ui.redMode.value === "0" ? 0 : 2);      // 2 = no tint at all
+  gl.uniform1i(U("uShade"), ui.shade.checked ? 1 : 0); gl.uniform1i(U("uScanOnly"), scanOnly() ? 1 : 0); gl.uniform1f(U("uMin"), tMin);
+  gl.uniform1f(U("uHeatThr"), Number(ui.heatThr.value));
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIndex); gl.drawElements(gl.TRIANGLES, index.length, gl.UNSIGNED_SHORT, 0);
+}
+function drawLines(segments, color, cam) {
+  begin(lines);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufLines); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(segments), gl.DYNAMIC_DRAW);
+  const loc = gl.getAttribLocation(lines, "aPos"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+  gl.uniformMatrix4fv(gl.getUniformLocation(lines, "uMVP"), false, cam.mvp); gl.uniform4fv(gl.getUniformLocation(lines, "uColor"), color);
+  gl.drawArrays(gl.LINES, 0, segments.length / 3);
+}
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (flight) flight(now);
+  const w = Math.round(canvas.clientWidth * devicePixelRatio), h = Math.round(canvas.clientHeight * devicePixelRatio);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; state.dirty = true; }
+  if (!state.dirty || !enFaceTex || !w || !h) return;
+  state.dirty = false;
+  const cam = camera(), s = stretch(), top = D0 * s, bottom = (D0 - DEPTH) * s;
+  const open = ui.cutOpen.checked, clip = open ? 1 : 0, sliceCut = ui.cut.checked && ui.showSlice.checked ? sliceV() + 0.25 / D.scans : 2;
+  if (textbook() && (!retina || retina.s !== s)) buildRetina(s);
+  const photoShown = curved() && wallMesh && !(scanOnly() && ui.texMode.value !== "1");   // the grey OCT modes show only what the OCT saw
+  gl.viewport(0, 0, w, h); gl.clearColor(0.055, 0.067, 0.086, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+  if (photoShown) {             // the whole photo on the back wall, around the patch
+    begin(wall);
+    const UW = n => gl.getUniformLocation(wall, n), aPos = gl.getAttribLocation(wall, "aPos"), aTex = gl.getAttribLocation(wall, "aTex");
+    gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.pos); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.tex); gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 0, 0);
+    const aLift = gl.getAttribLocation(wall, "aLift"); gl.bindBuffer(gl.ARRAY_BUFFER, wallMesh.lift); gl.enableVertexAttribArray(aLift); gl.vertexAttribPointer(aLift, 1, gl.FLOAT, false, 0, 0);
+    gl.uniform1f(UW("uEst"), scanOnly() && ui.estRelief.checked ? s : 0); gl.uniform1f(UW("uDim"), scanOnly() ? 1 : 0.9);
+    gl.uniformMatrix4fv(UW("uMVP"), false, cam.mvp); gl.uniform1i(UW("uHeatOn"), heatOn() && wallMesh.heat ? 1 : 0);
+    gl.uniform1f(UW("uRad"), R - MED * s - 0.03); gl.uniform1f(UW("uR"), R); gl.uniform2f(UW("uHalf"), W / 2, L / 2);   // just inside the drawn retina's surface
+    gl.uniform1f(UW("uHeatThr"), Number(ui.heatThr.value)); gl.uniform1f(UW("uOpacity"), Number(ui.opacity.value));
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, wallMesh.photo); gl.uniform1i(UW("uPhoto"), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, wallMesh.heat || wallMesh.photo); gl.uniform1i(UW("uHeat"), 1);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, wallMesh.idx); gl.drawElements(gl.TRIANGLES, wallMesh.count, gl.UNSIGNED_SHORT, 0);
+  }
+  drawSurface(mesh.ilm, false, cam);
+  if (ui.showLow.checked || curved()) drawSurface(mesh.low, true, cam);
+  if (curved()) {               // the patch's cut edges (real OCT) and the cut edge of what surrounds it
+    drawPatchEdges(s, sliceCut, cam);
+    drawSolid(patchWalls(s, sliceCut), scanOnly() ? [0.20, 0.21, 0.24, 1] : [0.80, 0.55, 0.38, 1], { style: 3, triangles: true }, cam);
+    if (scanOnly() && photoShown) drawSolid(photoRim(s), [0.30, 0.31, 0.34, 1], { style: 3 }, cam);
+  }
+  if (textbook()) {             // the drawn eye: every opaque part (see-through ones come last)
+    drawSolid(retina.inner, COLOR.retina, { clip, hole: true }, cam);
+    drawSolid(anatomy.sclera, COLOR.sclera, { clip }, cam);
+    drawSolid(anatomy.ciliary, COLOR.ciliary, { clip }, cam);
+    drawSolid(anatomy.iris, COLOR.iris, { clip, style: 1 }, cam);
+    drawSolid(anatomy.lens, COLOR.lens, { clip, style: 2 }, cam);
+    for (const m of anatomy.muscles) drawSolid(m, COLOR.muscle, { clip }, cam);
+    if (ui.nerve.value !== "0") for (const [m, color, style] of nerves[ui.nerve.value]) drawSolid(m, color, { style }, cam);
+    if (open) for (const [m, color, kind] of cutFaces.concat(retina.faces)) drawSolid(m, color, { style: 3, clip: kind }, cam);
+  }
+
+  const z = (sliceV() - 0.5) * L;
+  if (ui.showSlice.checked) {     // the upright B-scan, with the scan picture on it
+    begin(slab);
+    // A strip from just above the inner surface down to the bottom of the scan, so the empty
+    // (black) space above the retina does not hide the surface behind the B-scan.
+    const strip = [], v = sliceV(), N = 96;
+    for (let i = 0; i <= N; i++) {
+      const u = i / N, dTop = Math.max(0, at(ILM, u, v) / 1000 - 0.04);
+      if (curved()) {           // eyeball: the scan stands on the wall; its lower surface is at the wall, 0.3 mm of what lies below is shown
+        // down to just behind the wall (to where the drawn choroid begins), so the bright band under the retina is seen too
+        const low = at(LOW, u, v) / 1000, dBottom = Math.min(DEPTH, low + (R_CHOROID - R) / s);
+        strip.push(...onWall(u, v, (low - dTop) * s), u, dTop / DEPTH,  ...onWall(u, v, R - R_CHOROID), u, dBottom / DEPTH);
+      } else strip.push((u - 0.5) * W, (D0 - dTop) * s, z, u, dTop / DEPTH,  (u - 0.5) * W, bottom, z, u, 1);
+    }
+    const quad = new Float32Array(strip);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufSlab); gl.bufferData(gl.ARRAY_BUFFER, quad, gl.DYNAMIC_DRAW);
+    const aPos = gl.getAttribLocation(slab, "aPos"), aTex = gl.getAttribLocation(slab, "aTex");
+    gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 20, 12);
+    gl.uniformMatrix4fv(gl.getUniformLocation(slab, "uMVP"), false, cam.mvp);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sliceTex[Number(ui.slice.value)]); gl.uniform1i(gl.getUniformLocation(slab, "uScan"), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, quad.length / 5);
+  }
+  // The box of the scanned volume, the outline of the B-scan, and a stalk under each pin.
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  const box = [], X = W / 2, Z = L / 2;
+  for (const y of [top, bottom]) box.push(-X, y, -Z, X, y, -Z,  X, y, -Z, X, y, Z,  X, y, Z, -X, y, Z,  -X, y, Z, -X, y, -Z);
+  for (const [x, zz] of [[-X, -Z], [X, -Z], [X, Z], [-X, Z]]) box.push(x, top, zz, x, bottom, zz);
+  if (!curved()) drawLines(box, [0.75, 0.82, 0.95, 0.22], cam);
+  if (curved()) {               // the outline of the scanned patch on the wall
+    const edge = [], K = 40, corner = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    for (let c = 0; c < 4; c++) for (let i = 0; i < K; i++) for (const t of [i / K, (i + 1) / K]) {
+      const a = corner[c], b = corner[(c + 1) % 4]; edge.push(...onWall(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.02));
+    }
+    drawLines(edge, [0.42, 0.77, 1, scanOnly() ? 0.45 : 0.9], cam);
+    if (scanOnly()) drawLines(gridLines, [0.75, 0.82, 0.95, 0.13], cam);
+  }
+  if (ui.showSlice.checked && !curved()) drawLines([-X, top, z, X, top, z,  X, top, z, X, bottom, z,  X, bottom, z, -X, bottom, z,  -X, bottom, z, -X, top, z], [0.42, 0.77, 1, 0.9], cam);
+  const tips = [], stalks = [];
+  for (const f of D.findings.concat(SPOTS)) {
+    const base = surfacePoint(f.u, f.v, 0), tip = surfacePoint(f.u, f.v, 0.12 * Math.max(W, L));
+    tips.push([f.id, tip]); stalks.push(...base, ...tip);
+  }
+  if (state.probe) drawLines([...surfacePoint(state.probe.u, state.probe.v, 0), ...surfacePoint(state.probe.u, state.probe.v, 0.08 * Math.max(W, L))], [1, 1, 1, 1], cam);
+  if (ui.pinsOn.checked) drawLines(stalks, [1, 0.35, 0.28, 0.9], cam);
+  if (textbook()) {             // fine threads and the see-through parts, drawn last (they must not hide what lies behind)
+    const threads = []; for (const [t, seg] of zonules) if (!open || Math.sin(t) <= 0) threads.push(...seg);
+    drawLines(threads, [0.93, 0.93, 0.86, 0.55], cam);
+    gl.depthMask(false);
+    if (open) for (const m of aqueous) drawSolid(m, [0.55, 0.78, 0.95, 0.20], { style: 3, clip: 2 }, cam);
+    drawSolid(anatomy.corneaInner, [0.70, 0.88, 1.0, 0.10], { clip, style: 2 }, cam);
+    drawSolid(anatomy.cornea, [0.70, 0.88, 1.0, 0.22], { clip, style: 2 }, cam);
+    gl.depthMask(true);
+  }
+  layoutLabels(cam);
+  for (const [id, tip] of tips) {
+    const el = document.querySelector(`.pin[data-id="${id}"]`); if (!el) continue;
+    if (typeof id === "string") tip[0] += 0.05 * Math.max(W, L);      // model hot spots (letters): nudged aside so a number stays visible
+    const m = cam.mvp, x = m[0] * tip[0] + m[4] * tip[1] + m[8] * tip[2] + m[12], y = m[1] * tip[0] + m[5] * tip[1] + m[9] * tip[2] + m[13], wc = m[3] * tip[0] + m[7] * tip[1] + m[11] * tip[2] + m[15];
+    const on = wc > 0.05 && Math.abs(x / wc) < 1 && Math.abs(y / wc) < 1 && !(curved() && hiddenByWall(cam, tip, s));
+    el.style.display = on ? "" : "none";
+    if (on) { el.style.left = (x / wc * 0.5 + 0.5) * canvas.clientWidth + "px"; el.style.top = (0.5 - y / wc * 0.5) * canvas.clientHeight + "px"; }
+  }
+}
+
+// ---------------------------------------------------------------- start
+(async () => {
+  ui.thr.min = Math.floor(tMin); ui.thr.max = Math.ceil(tMax); ui.thr.value = Math.round(D.threshold_um);
+  ui.slice.max = D.slices.length - 1; ui.slice.value = nearestSlice(D.findings.length ? D.findings[0].scan : Math.floor(D.scans / 2));
+  enFaceTex = makeTexture(await loadImage(D.en_face));
+  if (F) {
+    photoTex = makeTexture(await loadImage(F.photo_on_scan));
+    if (F.heat_on_scan) {
+      const im = await loadImage(F.heat_on_scan); heatTex = makeTexture(im);
+      const c = document.createElement("canvas"); c.width = im.width; c.height = im.height; const ctx = c.getContext("2d"); ctx.drawImage(im, 0, 0);
+      const rgba = ctx.getImageData(0, 0, c.width, c.height).data; heatPix = { w: c.width, h: c.height, data: new Uint8Array(c.width * c.height) };
+      for (let i = 0; i < heatPix.data.length; i++) heatPix.data[i] = rgba[i * 4];
+    }
+  }
+  if (F && F.photo_full) {       // the whole photo, each of its points placed on the wall through the alignment
+    const m = F.registration.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0], G = 255, pos = [], tex = [], idx = [];
+    const fullImage = await loadImage(F.photo_full);
+    for (let j = 0; j <= G; j++) for (let i = 0; i <= G; i++) {
+      const x = i / G, y = j / G, dx = x - m[0][2], dy = y - m[1][2];
+      // the alignment maps scan (u, v) -> photo (x, y); here it is turned around: photo -> scan
+      const u = (m[1][1] * dx - m[0][1] * dy) / det, v = (-m[1][0] * dx + m[0][0] * dy) / det;
+      pos.push(...mul(onWall(u, v, 0), 1 / R)); tex.push(x, y);         // only the direction; the shader sets the distance
+    }
+    for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) { const a = j * (G + 1) + i, b = a + 1, c = a + G + 1, d = c + 1; idx.push(a, c, b, b, c, d); }
+    // The GUESSED relief (switch "Guess relief from photo"; never used for any number). One value per grid corner, in mm:
+    // darker than its surroundings (a vessel) = raised a little; the brightest area (the optic disc) = lowered.
+    const n = G + 1, cv = document.createElement("canvas"); cv.width = cv.height = n;
+    const cx = cv.getContext("2d"); cx.drawImage(fullImage, 0, 0, n, n);
+    const px = cx.getImageData(0, 0, n, n).data, green = new Float32Array(n * n), lum = new Float32Array(n * n);
+    for (let i = 0; i < n * n; i++) { green[i] = px[i * 4 + 1] / 255; lum[i] = (px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2]) / 765; }
+    const blur = (src, rad) => {    // average over a square of side 2 * rad + 1, done as two passes of running sums
+      let a = src, b = new Float32Array(n * n);
+      for (const [dx, dy] of [[1, 0], [0, 1]]) {
+        for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { let sum = 0, cnt = 0;
+          for (let k = -rad; k <= rad; k++) { const xx = x + k * dx, yy = y + k * dy; if (xx >= 0 && xx < n && yy >= 0 && yy < n) { sum += a[yy * n + xx]; cnt++; } }
+          b[y * n + x] = sum / cnt; }
+        a = b; b = new Float32Array(n * n);
+      }
+      return a;
+    };
+    const around = blur(green, 5), soft = blur(lum, 4), brightest = soft.reduce((a, b) => Math.max(a, b), 1e-6), lift = new Float32Array(n * n);
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const i = y * n + x; if (Math.hypot(x / G - 0.5, y / G - 0.5) > 0.47) continue;
+      lift[i] = 0.05 * Math.min(1, Math.max(0, (around[i] - green[i] - 0.02) / 0.10)) - 0.25 * Math.min(1, Math.max(0, (soft[i] - 0.8 * brightest) / (0.2 * brightest)));
+    }
+    wallMesh = { pos: buf(gl.ARRAY_BUFFER, new Float32Array(pos)), tex: buf(gl.ARRAY_BUFFER, new Float32Array(tex)), idx: buf(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx)), count: idx.length,
+                 lift: buf(gl.ARRAY_BUFFER, lift), photo: makeTexture(fullImage), heat: F.heat_full ? makeTexture(await loadImage(F.heat_full)) : null };
+  }
+  // choices that need a photo or a heat map are removed when there is none
+  if (!photoTex) { ui.texMode.querySelector('option[value="1"]').remove(); ui.texMode.value = "0"; }
+  if (!heatTex) ui.redMode.querySelector('option[value="1"]').remove();
+  document.querySelectorAll(".heatRow").forEach(e => e.style.display = heatTex ? "" : "none");
+  const images = await Promise.all(D.slices.map(s => loadImage(s.img)));
+  images.forEach((im, i) => { sliceImg[i] = im; sliceTex[i] = makeTexture(im); });
+  // The patch's left and right cut edges: one column of every B-scan, side by side (left edge = first column, right = last).
+  edgeTex = [0, 1].map(side => { const c = document.createElement("canvas"); c.width = images.length; c.height = images[0].height; const ctx = c.getContext("2d");
+    images.forEach((im, i) => ctx.drawImage(im, side ? im.width - 1 : 0, 0, 1, im.height, i, 0, 1, im.height)); return makeTexture(c); });
+  shapeDefaults(); buildViews(); setView("scan"); renderSide(); syncOutputs(); drawBscan(); requestAnimationFrame(frame);
+  window.addEventListener("resize", redraw);
+})();
+</script>
+</body>
+</html>
