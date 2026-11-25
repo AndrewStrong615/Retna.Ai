@@ -900,9 +900,19 @@ def test_photo2oct(tmp):
     photo_path = os.path.join(tmp, "p2o_photo.png")
     Image.fromarray(photo).save(photo_path)
     est = os.path.join(tmp, "p2o_est")
-    code, log = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est])
-    again, _ = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est])
-    code3, log3 = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est + "_net", "--model", os.path.join(out, "model.pt")])
+    code, log = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est, "--page"])
+    again, _ = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est, "--page"])
+    code3, log3 = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est + "_net", "--model", os.path.join(out, "model.pt"),
+                       "--no-caption"])
+    # The default output is ONE picture: the estimated B-scan, labelled; no page unless --page.
+    pic = Image.open(os.path.join(est, "oct.png")) if code == 0 else None
+    bare = Image.open(os.path.join(est + "_net", "oct.png")) if code3 == 0 else None
+    check("photo2oct estimate: the output is one grey OCT picture (768 x 512 + a caption line; --no-caption: none), marked "
+          "as an estimate inside the file; the 3D page is written only with --page",
+          pic is not None and bare is not None and pic.mode == "L" and pic.size == (768, 534) and bare.size == (768, 512)
+          and "ESTIMATED" in pic.info.get("Description", "") and "ESTIMATED" in bare.info.get("Description", "")
+          and not os.path.exists(os.path.join(est + "_net", "viewer.html"))
+          and np.asarray(bare)[:100].mean() < 40 < np.asarray(bare)[250:320].mean())
     page = open(os.path.join(est, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
     info = json.load(open(os.path.join(est, "estimate.json"))) if code == 0 else {}
     check("photo2oct estimate: writes the page marked ESTIMATED (banner code, 'estimate' data, no heat), the map and "

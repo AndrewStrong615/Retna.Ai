@@ -213,8 +213,11 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   a real photo. `train --pairs D --out R`: split by PATIENT 70/15/15, best epoch on validation, test patients scored
   once against two no-network yardsticks (atlas, mean training map). `make-pair --oct <oct3d.py --photo folder> --photo
   P --patient ID --nasal left|right --pairs D`: one real pair (needs a TRUSTED registration and a ~6 x 6 mm scan).
-  `estimate --photo P --out D [--model M] [--disc x y --fovea x y]`: writes thickness_um.npy, landmarks.png (check it),
-  estimate.json and the oct3d page with `estimate` data: a banner "ESTIMATED from a photo", all "measured" texts
+  `estimate --photo P --out D [--model M] [--disc x y --fovea x y]`: THE OUTPUT is one picture, `D\oct.png`: the
+  estimated B-scan through the fovea (grey, 768 x 512, drawn from the estimated thickness), with a thin line
+  "ESTIMATED ... not a scan" under it (`--no-caption` removes the line; the words always stay in the PNG's text
+  fields), plus estimate.json and thickness_um.npy. Only with `--page`: landmarks.png (check it) and the oct3d page
+  with `estimate` data: a banner "ESTIMATED from a photo", all "measured" texts
   replaced; its B-scans are DRAWN from the estimate (layers at fixed fractions, shadows under the photo's vessels).
   POINTS OF INTEREST on the estimate (yellow letters A, B.., each with the ESTIMATED thickness under it): from
   `--heat` (the disease model's heat picture from eye3d.py) or, without it, `photo_spots`: a classical filter for small

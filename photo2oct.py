@@ -31,12 +31,18 @@ measurement and must never be read as one.
 
 What `estimate` writes
 ----------------------
+  <out>/oct.png         THE OUTPUT: one OCT-style picture, the estimated B-scan through the
+                        fovea. It is DRAWN from the estimated thickness (see below), with a
+                        thin line "ESTIMATED ... not a scan" under it (--no-caption removes
+                        the line; the same words always stay inside the file's text fields).
+  <out>/estimate.json, thickness_um.npy   the numbers behind the picture.
+  Only with --page:
   <out>/viewer.html     the oct3d.py page, marked ESTIMATED: the photo curved onto the eye
                         wall, the estimated surface over a 6 x 6 mm square at the fovea.
                         The B-scans in it are DRAWN from the estimate (layers painted at
                         fixed fractions of the thickness, vessel shadows under the photo's
                         vessels): cartoons of a scan, not a scan.
-  <out>/thickness_um.npy, landmarks.png (check the two landmarks by eye!), estimate.json
+  <out>/landmarks.png   the photo with disc, fovea and the square drawn in (check it by eye!)
 
 Assumptions (all written into estimate.json):
   - disc centre to fovea = 4.5 mm (it varies by roughly +-0.3 mm between people): this
@@ -476,10 +482,34 @@ def drawn_volume(thick_um, vessel_mask=None, n_scans=64, width=256, depth=256, s
             (ilm_um / spacing["dz"] - 0.5).astype(np.float32), (low_um / spacing["dz"] - 0.5).astype(np.float32))
 
 
-def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False, log=print, heat_path=None):
+def oct_picture(vol, caption=None, size=(768, 512)):
+    """
+    THE OUTPUT: one OCT-style picture, the drawn B-scan through the fovea (the middle one of
+    the stack, running left to right across the 6 mm square), as an eye doctor's screen shows
+    it: grey, the retina's inner surface on top, 6 mm wide and 2 mm deep stretched to 3:2.
+    `caption`: a thin line of text under the picture (None = no line).
+    """
+    scan = Image.fromarray(vol[vol.shape[0] // 2]).resize(size, Image.Resampling.LANCZOS)
+    if not caption:
+        return scan
+    out = Image.new("L", (size[0], size[1] + 22), 0)
+    out.paste(scan, (0, 0))
+    ImageDraw.Draw(out).text((8, size[1] + 5), caption, fill=170)
+    return out
+
+
+def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False, log=print, heat_path=None,
+             page=False, caption=True):
+    """
+    Photo -> <out>/oct.png (the estimated OCT picture; that is the whole output by default),
+    plus estimate.json and thickness_um.npy (the numbers behind it, for the record).
+    page=True also writes the 3D page viewer.html and landmarks.png.
+    """
+    want_page = page
     page_path = os.path.join(out, "viewer.html")
-    if os.path.exists(page_path) and not overwrite:
-        raise SystemExit(f"{page_path} exists. Pick a new --out or add --overwrite.")
+    picture_path = os.path.join(out, "oct.png")
+    if os.path.exists(picture_path) and not overwrite:
+        raise SystemExit(f"{picture_path} exists. Pick a new --out or add --overwrite.")
     rgb = square_photo(np.asarray(Image.open(photo_path).convert("RGB")))
     if max(rgb.shape) > 1024:
         rgb = np.asarray(Image.fromarray(rgb).resize((1024, 1024), Image.Resampling.LANCZOS))
@@ -561,13 +591,21 @@ def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False
             "thickness_um": summary["thickness_um"], "model": os.path.abspath(model) if model else None}
     page["estimate"] = info                                               # the page shows its ESTIMATED banner from this
 
-    with open(oct3d.TEMPLATE, encoding="utf-8") as f:
-        html = f.read()
     os.makedirs(out, exist_ok=True)
-    with open(page_path, "w", encoding="utf-8") as f:
-        f.write(html.replace(oct3d.DATA_MARK, json.dumps(page).replace("</", "<\\/")))
+    # The picture. The words "estimated ... not a scan" travel with it twice: as a thin line under it (unless
+    # caption=False) and, always, inside the file's own text fields, because a bare grey picture looks like a real scan.
+    from PIL.PngImagePlugin import PngInfo
+    words = f"ESTIMATED from a fundus photo ({method}), not a scan"
+    tags = PngInfo()
+    tags.add_text("Description", words + ". " + basis)
+    oct_picture(vol, words if caption else None).save(picture_path, pnginfo=tags)
+    if want_page:
+        with open(oct3d.TEMPLATE, encoding="utf-8") as f:
+            html = f.read()
+        with open(page_path, "w", encoding="utf-8") as f:
+            f.write(html.replace(oct3d.DATA_MARK, json.dumps(page).replace("</", "<\\/")))
+        Image.fromarray(check).save(os.path.join(out, "landmarks.png"))
     np.save(os.path.join(out, "thickness_um.npy"), thick.astype(np.float32))
-    Image.fromarray(check).save(os.path.join(out, "landmarks.png"))
     with open(os.path.join(out, "estimate.json"), "w") as f:
         json.dump(info, f, indent=2)
     t = summary["thickness_um"]
@@ -578,7 +616,9 @@ def estimate(photo_path, out, model=None, disc=None, fovea=None, overwrite=False
             f"estimated retina under it {f['thickness_um']:.0f} um")
     for f in findings:
         log(f"  estimated thickening #{f['id']}: {f['excess_um']:.0f} um above the average eye, {f['area_mm2']:.1f} mm2")
-    log(f"Open in a browser: {page_path}  (it embeds the photo: do not commit it). Check {os.path.join(out, 'landmarks.png')} first.")
+    log(f"The estimated OCT picture: {picture_path}")
+    if want_page:
+        log(f"3D page: {page_path}  (it embeds the photo: do not commit it). Check {os.path.join(out, 'landmarks.png')} first.")
     return info
 
 
@@ -617,6 +657,8 @@ def main():
     e.add_argument("--fovea", nargs=2, type=float, metavar=("X", "Y"))
     e.add_argument("--heat", help="the disease model's heat map for this photo (gray picture, same frame; eye3d.py writes "
                                   "them to <run>/eye3d/heat/). Without it: a classical spot filter marks points of interest")
+    e.add_argument("--page", action="store_true", help="also write the 3D page (viewer.html) and landmarks.png")
+    e.add_argument("--no-caption", action="store_true", help="leave out the thin 'estimated, not a scan' line under the picture")
     e.add_argument("--overwrite", action="store_true")
     s = sub.add_parser("synthetic-pairs", help="cartoon pairs with a known rule, to test the code")
     s.add_argument("--out", required=True)
@@ -637,7 +679,8 @@ def main():
     t.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
     if args.cmd == "estimate":
-        estimate(args.photo, args.out, args.model, args.disc, args.fovea, args.overwrite, heat_path=args.heat)
+        estimate(args.photo, args.out, args.model, args.disc, args.fovea, args.overwrite, heat_path=args.heat,
+                 page=args.page, caption=not args.no_caption)
     elif args.cmd == "synthetic-pairs":
         for i in range(args.eyes):                                        # two eyes per cartoon patient
             crop, thick, _ = synthetic_pair(i)
