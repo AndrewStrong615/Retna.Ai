@@ -803,8 +803,10 @@ def test_oct3d(tmp):
     # Eyeball shape: the page needs the WHOLE photo and heat (they are wrapped onto the back wall around the
     # measured patch) and the shape switch. The curving itself happens in the page (WebGL), so it is checked by
     # eye in a browser, not here.
-    check("oct3d.py --demo page carries the whole photo + heat for the eyeball's back wall, and the shape switch",
-          '"photo_full"' in page and '"heat_full"' in page and 'id="shape"' in page and "uCurved" in page)
+    check("oct3d.py --demo page carries the whole photo + heat for the eyeball's back wall, the shape switch, "
+          "the cut-open eye's switches (cut, part names) and the 1x-5x relief slider",
+          '"photo_full"' in page and '"heat_full"' in page and 'id="shape"' in page and "uCurved" in page
+          and 'id="cutOpen"' in page and 'id="labelsOn"' in page and 'id="stretch" type="range" min="1" max="5"' in page)
     # A real-style call with files: scan folder + photo of ANOTHER eye must be refused; --heat needs --photo.
     scan_dir = os.path.join(tmp, "oct_pair")
     os.makedirs(scan_dir)

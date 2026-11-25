@@ -174,13 +174,20 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   with the retina thickness under each); refuses an untrusted match unless `--force-fusion`. The heat is computed on
   the flat photo (`eye3d.py` now writes `<run>/eye3d/heat/<name>.png`); photo and heat must be the same preprocessed
   frame. `oct3d.py --demo` shows the fused cartoon pair (its heat is DRAWN, not from a model).
-  Page shapes (switch under Display): "Eyeball" (default) = a see-through, cutaway globe of STANDARD size (24 mm;
-  cornea, lens, iris, optic nerve: a drawing, not this eye) with the whole registered photo and the OCT patch curved
-  onto the inner back wall: a point l mm from the patch centre sits at angle l/12 from the back pole (distances along
-  the wall kept), the lower surface lies ON the wall and the inner surface rises by the MEASURED thickness (x the
-  stretch slider); the scan's own tilt is dropped. Assumed: eye size, the patch centred on the back pole, the nerve's
-  side (chosen in the page). "Flat block" = exactly as scanned. Buttons: Whole eye / Zoom into the OCT patch / Side.
-  The curving is done in the page (WebGL), looked at in a browser on the demo; selftest checks only the page's data. Real data caveat:
+  Page shapes (switch under Display): "Eyeball" (default) = a textbook-style cutaway of a STANDARD 24 mm eye, all
+  hand-written WebGL (no three.js): the top-front quarter is cut away (y > 0 and z > -1.5 mm; "Cut the eye open"), the
+  cut faces show sclera (white), choroid (dark red), retina (peach); cornea, anterior chamber, iris with pupil, pleated
+  ciliary body, zonular fibres, lens, four rectus muscle stubs, optic nerve with central artery and vein. ALL of that is
+  a DRAWING (coats drawn thicker than life), the same for every scan. The whole registered photo and the OCT patch are
+  curved onto the inner back wall: a point l mm from the patch centre sits at angle l/11 from the back pole (11 mm =
+  radius of the retina's back surface; distances along the wall kept), the lower surface lies ON the wall and the inner
+  surface rises by the MEASURED thickness x the relief slider (1x anatomical to 5x; buttons for both ends); the drawn
+  retina around the patch gets this scan's median thickness x the same relief, so the patch sits flush; the scan's own
+  tilt is dropped. Assumed: eye size, the patch centred on the back pole, the nerve's side (chosen in the page).
+  Part names with leader lines (two columns, pushed apart so they never overlap; hidden when the wall is in the way;
+  "Hide names"). Buttons: Full cutaway / Zoom to OCT patch / Front view / Section from above. "Flat block" = exactly as
+  scanned. All of this runs in the page (WebGL), looked at in a browser on the demo; selftest checks only the page's
+  data and switches. Real data caveat:
   OLIVES pairs OCT with NEAR-INFRARED fundus pictures (as recalled; verify on download), not the colour photos the
   model was trained on: fine for testing registration, out of domain for the model's heat.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with

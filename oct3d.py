@@ -26,9 +26,10 @@ What this script does with a volume, all hand-written, nothing learned:
   4. WRITE ONE WEB PAGE (<out>/viewer.html, no internet needed) with the real
      surface as a 3D shape you can turn, shaded red where the retina is thick,
      a B-scan you can slide through the volume, and click-to-measure. Two shapes:
-     the scan curved onto the back wall of a see-through standard eyeball (the
-     globe, cornea, lens and optic nerve are a DRAWING for orientation; the
-     thickness on it is measured), or the flat block exactly as scanned.
+     the scan curved onto the back wall of a textbook-style cut-open standard eye
+     (wall coats, cornea, iris, lens, ciliary body, muscles and optic nerve are a
+     DRAWING with named parts, the same for every scan; the thickness on it is
+     measured, with a 1x-5x relief slider), or the flat block exactly as scanned.
 
 WHAT IS REAL AND WHAT IS NOT:
   - The shape and the micrometres are measured from the scan (given the right
