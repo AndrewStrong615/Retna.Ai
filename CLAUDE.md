@@ -150,6 +150,19 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   no depth; the page assumes a round eye and that the photo covers `--cap-deg` 36 around the back pole (an assumption,
   adjustable in the page). Real depth would need OCT. The page embeds the photos: never commit it. Also writes
   `findings.json` (the same numbers as a table).
+- `oct3d.py` + `oct3d_viewer.html` (TRUE 3D from OCT; checked on a synthetic volume only, no real scan yet): reads
+  an OCT volume (folder of B-scan pictures, `.npy` [scan, depth, width], or Heidelberg `.vol`: parser written from
+  the published layout, not yet tried on a real file; `.e2e`/DICOM not read), finds two surfaces per B-scan (ILM and
+  the top of the photoreceptor/RPE band: the two strongest dark-to-bright edges, each as the best left-to-right path
+  by hand-written dynamic programming, after Chiu et al. 2010; nothing learned), thickness map in um, thickened
+  areas as numbered findings (default: above median + max(2.5 robust SD, 50 um) of THIS scan; no normal-eye
+  database), and writes `<out>/viewer.html`: the measured surface as a 3D shape, red where thick, a B-scan sliding
+  through the volume, click to measure; plus `layers.npz`, `summary.json`. `--demo` = built-in synthetic volume (known
+  answer: surfaces within ~3 um). Pixel size comes from the .vol, else from `--width-mm/--length-mm/--depth-mm`
+  (marked "assumed"). A .vol's own device surfaces are compared with ours (free check). The disease model reads
+  fundus photos only: NO model heat on OCT until there is photo-OCT registration or an OCT model trained from
+  scratch. Planned real data: OLIVES (Prabhushankar et al. 2022, Zenodo 7105232: DR/DME eyes, OCT volumes + near-IR
+  fundus; check its licence before use; kept in `retina-data\olives`, never in the repo). Never commit scans or pages.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are

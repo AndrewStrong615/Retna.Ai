@@ -1,0 +1,474 @@
+<!doctype html>
+<!--
+  OCT 3D viewer: the page that oct3d.py fills in (it replaces the OCT_DATA marker
+  below with one scan's surfaces, thickness and B-scans). One file, hand-written
+  WebGL, no library, no internet.
+
+  Unlike eye3d_viewer.html, the SHAPE here is measured. Coordinates are in
+  millimetres:  x = along a B-scan,  z = from the first B-scan to the last,
+  y = up (toward the inside of the eye), multiplied by the "stretch" slider,
+  because a retina is ~0.3 mm thick and 6 mm wide and looks flat at true scale.
+
+  Three things are drawn:
+    1. the inner surface (ILM): a grid of measured depths, lit from above, and
+       mixed with red where the retina under it is thicker than the threshold;
+    2. the lower surface (the bright band at the bottom of the retina);
+    3. one B-scan, standing upright at its real position: the raw data itself.
+  A click sends a ray from the camera and walks along it until it goes below the
+  inner surface: that is the point you clicked.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCT 3D view</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171b22; --line:#2a303b; --text:#e6e9ee; --dim:#9aa3b2; --red:#ff4d3d; --accent:#6cc5ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+               font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display:flex; height:100%; }
+  #stage { position:relative; flex:1; min-width:0; }
+  canvas#gl { display:block; width:100%; height:100%; cursor:grab; touch-action:none; }
+  canvas#gl.drag { cursor:grabbing; }
+  #side { width:372px; max-width:100%; background:var(--panel); border-left:1px solid var(--line);
+          overflow-y:auto; padding:14px 16px 24px; }
+  h1 { font-size:16px; margin:0 0 2px; }
+  h2 { font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); margin:18px 0 6px; }
+  button { font:inherit; color:var(--text); background:#222833; border:1px solid var(--line); border-radius:6px; padding:6px 8px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .row label { flex:0 0 132px; color:var(--dim); }
+  .row input[type=range] { flex:1; min-width:0; }
+  .row output { flex:0 0 58px; text-align:right; font-variant-numeric:tabular-nums; }
+  .facts { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin:6px 0 0; }
+  .facts dt { color:var(--dim); } .facts dd { margin:0; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:10px; font-size:12px; border:1px solid #7a5a26; color:#ffd9a0; }
+  .finding { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 0; cursor:pointer; }
+  .finding:hover { border-color:var(--accent); }
+  .finding.sel { border-color:var(--red); background:#241a1b; }
+  .finding b { color:var(--red); } .finding small { color:var(--dim); display:block; }
+  .note { color:var(--dim); font-size:12.5px; border-left:3px solid var(--line); padding-left:10px; margin:8px 0; }
+  .note strong { color:var(--text); }
+  #probe { min-height:3.2em; }
+  #bscan { width:100%; display:block; border:1px solid var(--line); border-radius:6px; background:#000; }
+  .pin { position:absolute; transform:translate(-50%,-50%); width:22px; height:22px; border-radius:50%;
+         background:rgba(20,20,24,.85); border:2px solid var(--red); color:#fff; font-size:12px; font-weight:600;
+         display:flex; align-items:center; justify-content:center; cursor:pointer; user-select:none; }
+  .pin.sel { background:var(--red); border-color:#fff; }
+  #views { position:absolute; left:12px; top:12px; display:flex; gap:6px; flex-wrap:wrap; }
+  #hint { position:absolute; left:12px; bottom:10px; color:var(--dim); font-size:12px; pointer-events:none; }
+  #legend { position:absolute; right:12px; bottom:10px; font-size:12px; color:var(--dim); text-align:right; pointer-events:none; }
+  #legend i { display:block; width:170px; height:10px; border-radius:5px; margin:3px 0 0 auto; background:linear-gradient(90deg,#73000a,#ff1a0d 80%,#ffcc59); }
+  @media (max-width: 760px) { #app { flex-direction:column; } #side { width:100%; height:50%; border-left:0; border-top:1px solid var(--line); }
+                              #stage { height:50%; flex:none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <div id="pins"></div>
+    <div id="views">
+      <button data-view="three">3/4 view</button>
+      <button data-view="top">From above</button>
+      <button data-view="front">From the front</button>
+    </div>
+    <div id="hint">Drag to turn · wheel or pinch to zoom · click the surface to measure a spot</div>
+    <div id="legend"><span id="legendText"></span><i></i></div>
+  </div>
+  <div id="side">
+    <h1>OCT 3D view</h1>
+    <div style="color:var(--dim)" id="source"></div>
+    <dl class="facts" id="facts"></dl>
+
+    <h2>Thickened areas</h2>
+    <div id="findings"></div>
+
+    <h2>Clicked spot</h2>
+    <div id="probe" class="note">Click anywhere on the surface.</div>
+
+    <h2>B-scan (the raw data)</h2>
+    <canvas id="bscan"></canvas>
+    <div class="row"><label for="slice">Scan</label><input id="slice" type="range" min="0" max="0" step="1" value="0"><output></output></div>
+    <div class="note" style="margin-top:2px">Blue line: inner surface found. Yellow line: lower surface found. If a line is off the tissue edge, the numbers there are wrong.</div>
+
+    <h2>Display</h2>
+    <div class="row"><label for="thr">Red above</label><input id="thr" type="range" step="1"><output></output></div>
+    <div class="row"><label for="opacity">Red strength</label><input id="opacity" type="range" min="0" max="1" step="0.01" value="0.85"><output></output></div>
+    <div class="row"><label for="stretch">Stretch the depth</label><input id="stretch" type="range" min="1" max="8" step="0.1" value="3"><output></output></div>
+    <div class="row"><label for="showLow">Lower surface</label><input id="showLow" type="checkbox" checked></div>
+    <div class="row"><label for="showSlice">B-scan in 3D</label><input id="showSlice" type="checkbox" checked></div>
+    <div class="row"><label for="cut">Cut away in front</label><input id="cut" type="checkbox" checked></div>
+    <div class="row"><label for="pinsOn">Numbered pins</label><input id="pinsOn" type="checkbox" checked></div>
+
+    <h2>What this is, and is not</h2>
+    <div class="note"><strong>The shape is measured.</strong> Every point of the surface comes from the OCT scan, in
+      micrometres. "Stretch the depth" only makes the relief easier to see; at 1x the proportions are true.
+      <span id="spacingNote"></span></div>
+    <div class="note"><strong>The surfaces are found by a classical method</strong> (strongest dark-to-bright edges, joined
+      into smooth lines), not by a trained model. It can fail in shadows, very swollen retina, or at the optic disc. Check
+      the lines on the B-scan. The lower line is the top of the bright band, so thickness reads some tens of micrometres
+      lower than a device's own number. <span id="deviceNote"></span></div>
+    <div class="note"><strong>Red = thicker than the threshold</strong>, which by default means clearly thicker than the rest
+      of this scan. There is no database of normal eyes behind it. It is a measurement, not a diagnosis.</div>
+    <div class="note"><strong>No AI heat map here yet.</strong> The disease model reads fundus photos and has never seen OCT.</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const D = /*OCT_DATA*/;
+const $ = id => document.getElementById(id);
+const fmt = (v, d) => Number(v).toFixed(d === undefined ? 0 : d);
+
+// ---------------------------------------------------------------- the measurements
+function floats(b64) {          // text from oct3d.py -> numbers
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
+const [ROWS, COLS] = D.grid;                    // rows = B-scans, columns = along a B-scan
+const ILM = floats(D.ilm_um), LOW = floats(D.low_um);        // depth below the top of the scan, micrometres
+const [W, L, DEPTH] = D.size_mm;                // width, length (first to last scan), depth, in mm
+const D0 = DEPTH / 2;                           // the depth that sits at height 0
+const THICK = ILM.map((v, i) => LOW[i] - v);
+const rowV = r => (Math.round(r * (D.scans - 1) / Math.max(1, ROWS - 1)) + 0.5) / D.scans;   // where grid row r lies, 0..1
+const colU = c => (c + 0.5) / COLS;
+function at(grid, u, v) {       // value at a position (u along the scan, v across scans), blended from the 4 nearest points
+  const cf = Math.min(COLS - 1, Math.max(0, u * COLS - 0.5)), rf = Math.min(ROWS - 1, Math.max(0, (v * D.scans - 0.5) * (ROWS - 1) / Math.max(1, D.scans - 1)));
+  const c0 = Math.floor(cf), r0 = Math.floor(rf), c1 = Math.min(COLS - 1, c0 + 1), r1 = Math.min(ROWS - 1, r0 + 1), a = cf - c0, b = rf - r0;
+  return (grid[r0 * COLS + c0] * (1 - a) + grid[r0 * COLS + c1] * a) * (1 - b) + (grid[r1 * COLS + c0] * (1 - a) + grid[r1 * COLS + c1] * a) * b;
+}
+
+// ---------------------------------------------------------------- vector / matrix helpers (4x4, column by column)
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => mul(a, 1 / (Math.hypot(a[0], a[1], a[2]) || 1));
+function perspective(fovY, aspect, near, far) {
+  const f = 1 / Math.tan(fovY / 2), d = 1 / (near - far);
+  return [f / aspect, 0, 0, 0,  0, f, 0, 0,  0, 0, (far + near) * d, -1,  0, 0, 2 * far * near * d, 0];
+}
+function lookAt(eye, right, up, fwd) {
+  return [right[0], up[0], -fwd[0], 0,  right[1], up[1], -fwd[1], 0,  right[2], up[2], -fwd[2], 0, -dot(right, eye), -dot(up, eye), dot(fwd, eye), 1];
+}
+function matMul(a, b) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+  return o;
+}
+
+// ---------------------------------------------------------------- WebGL
+const canvas = $("gl");
+const gl = canvas.getContext("webgl", { antialias: true, alpha: false });
+if (!gl) { document.body.innerHTML = "<p style='padding:20px'>This browser cannot show WebGL (3D) content.</p>"; throw new Error("no webgl"); }
+function program(vsSource, fsSource) {
+  const make = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  const p = gl.createProgram();
+  gl.attachShader(p, make(gl.VERTEX_SHADER, vsSource)); gl.attachShader(p, make(gl.FRAGMENT_SHADER, fsSource));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+// A measured surface. Each corner of the grid knows its position in the scan (aUV), its measured
+// depth in mm (aDepth), how steeply the surface slopes there (aSlope) and the thickness under it.
+const surface = program(`
+  attribute vec2 aUV; attribute float aDepth, aThick; attribute vec2 aSlope;
+  uniform mat4 uMVP; uniform vec3 uSize; uniform float uStretch;      // uSize = (width, length, depth that sits at height 0)
+  varying vec2 vUV; varying float vThick; varying vec3 vNormal;
+  void main() {
+    vUV = aUV; vThick = aThick;
+    // Height = -depth: deeper is lower. The surface's normal (the direction it faces) follows from its slopes.
+    vNormal = vec3(uStretch * aSlope.x, 1.0, uStretch * aSlope.y);
+    gl_Position = uMVP * vec4((aUV.x - 0.5) * uSize.x, (uSize.z - aDepth) * uStretch, (aUV.y - 0.5) * uSize.y, 1.0);
+  }`, `
+  precision mediump float;
+  uniform sampler2D uEnFace; uniform float uThr, uMax, uOpacity, uCutV; uniform bool uCut, uLower;
+  varying vec2 vUV; varying float vThick; varying vec3 vNormal;
+  void main() {
+    if (uCut && vUV.y > uCutV) discard;                        // cut away what is in front of the B-scan
+    float light = 0.40 + 0.60 * abs(dot(normalize(vNormal), normalize(vec3(0.35, 0.85, 0.40))));
+    vec3 col;
+    if (uLower) col = vec3(0.62, 0.46, 0.26);
+    else {
+      col = vec3(0.80, 0.76, 0.74) * (0.45 + 0.55 * texture2D(uEnFace, vUV).r);   // the scan seen from above, as texture
+      if (vThick > uThr) {
+        float t = clamp((vThick - uThr) / max(uMax - uThr, 1.0), 0.0, 1.0);
+        vec3 hot = t < 0.8 ? mix(vec3(0.45, 0.0, 0.04), vec3(1.0, 0.10, 0.05), t / 0.8)
+                           : mix(vec3(1.0, 0.10, 0.05), vec3(1.0, 0.80, 0.35), (t - 0.8) / 0.2);
+        col = mix(col, hot, uOpacity * (0.45 + 0.55 * t));
+      }
+    }
+    gl_FragColor = vec4(col * light, 1.0);
+  }`);
+// The upright B-scan: a rectangle with the scan picture on it.
+const slab = program(`
+  attribute vec3 aPos; attribute vec2 aTex; uniform mat4 uMVP; varying vec2 vTex;
+  void main() { vTex = aTex; gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; uniform sampler2D uScan; varying vec2 vTex;
+  void main() { gl_FragColor = vec4(texture2D(uScan, vTex).rgb, 1.0); }`);
+const lines = program(`
+  attribute vec3 aPos; uniform mat4 uMVP;
+  void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; uniform vec4 uColor;
+  void main() { gl_FragColor = uColor; }`);
+
+const buf = (target, data) => { const b = gl.createBuffer(); gl.bindBuffer(target, b); gl.bufferData(target, data, gl.STATIC_DRAW); return b; };
+// The grid, shared by both surfaces: positions, and triangles joining neighbouring points.
+const uv = new Float32Array(ROWS * COLS * 2);
+for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) { uv[(r * COLS + c) * 2] = colU(c); uv[(r * COLS + c) * 2 + 1] = rowV(r); }
+const index = new Uint16Array((ROWS - 1) * (COLS - 1) * 6);
+for (let r = 0, n = 0; r < ROWS - 1; r++) for (let c = 0; c < COLS - 1; c++) {
+  const a = r * COLS + c, b = a + 1, d = a + COLS, e = d + 1; index.set([a, d, b, b, d, e], n); n += 6;
+}
+function slopes(grid) {         // how much the depth (mm) changes per mm sideways (x) and per mm across scans (z)
+  const s = new Float32Array(ROWS * COLS * 2), dx = W / COLS, dz = L * (rowV(Math.min(1, ROWS - 1)) - rowV(0)) || 1;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const c0 = Math.max(0, c - 1), c1 = Math.min(COLS - 1, c + 1), r0 = Math.max(0, r - 1), r1 = Math.min(ROWS - 1, r + 1);
+    s[(r * COLS + c) * 2] = (grid[r * COLS + c1] - grid[r * COLS + c0]) / 1000 / ((c1 - c0) * dx || 1);
+    s[(r * COLS + c) * 2 + 1] = (grid[r1 * COLS + c] - grid[r0 * COLS + c]) / 1000 / ((r1 - r0) * dz || 1);
+  }
+  return s;
+}
+const bufUV = buf(gl.ARRAY_BUFFER, uv), bufIndex = buf(gl.ELEMENT_ARRAY_BUFFER, index), bufThick = buf(gl.ARRAY_BUFFER, THICK);
+const mesh = { ilm: { depth: buf(gl.ARRAY_BUFFER, ILM.map(v => v / 1000)), slope: buf(gl.ARRAY_BUFFER, slopes(ILM)) },
+               low: { depth: buf(gl.ARRAY_BUFFER, LOW.map(v => v / 1000)), slope: buf(gl.ARRAY_BUFFER, slopes(LOW)) } };
+const bufSlab = gl.createBuffer(), bufLines = gl.createBuffer();
+
+function loadImage(url) { return new Promise((ok, fail) => { const im = new Image(); im.onload = () => ok(im); im.onerror = fail; im.src = url; }); }
+function makeTexture(image) {
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return t;
+}
+
+// ---------------------------------------------------------------- state and controls
+const state = { yaw: 0.6, pitch: 0.5, dist: 13, target: [0, 0, 0], dirty: true, sel: 0, probe: null };
+const ui = {}; for (const id of ["slice", "thr", "opacity", "stretch", "showLow", "showSlice", "cut", "pinsOn"]) ui[id] = $(id);
+const redraw = () => { state.dirty = true; };
+const stretch = () => Number(ui.stretch.value);
+const height = depthUm => (D0 - depthUm / 1000) * stretch();          // measured depth -> height in the 3D scene
+const worldOf = (u, v, depthUm) => [(u - 0.5) * W, height(depthUm), (v - 0.5) * L];
+const tMin = Math.min(...THICK), tMax = Math.max(...THICK);
+let enFaceTex = null; const sliceTex = [], sliceImg = [];
+const sliceV = () => (D.slices[Number(ui.slice.value)].scan + 0.5) / D.scans;
+
+function syncOutputs() {
+  ui.thr.nextElementSibling.textContent = fmt(ui.thr.value) + " µm";
+  ui.opacity.nextElementSibling.textContent = fmt(ui.opacity.value * 100) + "%";
+  ui.stretch.nextElementSibling.textContent = fmt(ui.stretch.value, 1) + "x";
+  ui.slice.nextElementSibling.textContent = (D.slices[Number(ui.slice.value)].scan + 1) + " / " + D.scans;
+  $("legendText").textContent = `retina thickness: ${fmt(ui.thr.value)} → ${fmt(tMax)} µm`;
+}
+for (const id in ui) ui[id].addEventListener("input", () => { if (id === "pinsOn") $("pins").style.display = ui.pinsOn.checked ? "" : "none"; syncOutputs(); drawBscan(); redraw(); });
+
+// ---------------------------------------------------------------- side panel
+function renderSide() {
+  const t = D.thickness_um, s = D.spacing_um;
+  $("source").textContent = D.source;
+  $("facts").innerHTML =
+    `<dt>Scan</dt><dd>${D.scans} B-scans of ${D.width_px} x ${D.depth_px} px</dd>` +
+    `<dt>Covers</dt><dd>${fmt(W, 1)} x ${fmt(L, 1)} mm, ${fmt(DEPTH, 1)} mm deep${D.spacing_assumed ? " <span class='tag'>assumed</span>" : ""}</dd>` +
+    `<dt>One pixel</dt><dd>${fmt(s.dx, 1)} µm wide, ${fmt(s.dz, 1)} µm deep; scans ${fmt(s.dy)} µm apart</dd>` +
+    `<dt>Thickness</dt><dd>median ${fmt(t.median)} µm · thinnest ${fmt(t.min)} · thickest ${fmt(t.max)}</dd>` +
+    `<dt>Centre (1 mm)</dt><dd>${fmt(t.central_1mm)} µm <span style="color:var(--dim)">(if the scan is centred on the fovea)</span></dd>`;
+  $("spacingNote").innerHTML = D.spacing_assumed ? "<strong>The scan's size in mm was not in the data</strong>: it was typed in or left at the default, so every mm and µm here depends on that being right." : "";
+  const dc = D.device_check;
+  $("deviceNote").textContent = dc ? "Against the device's own lines in this file, ours are on average " +
+    Object.entries(dc).map(([k, v]) => `${fmt(v.mean_abs_um)} µm away (${k === "ilm" ? "inner surface" : "lower surface vs Bruch's membrane"})`).join(" and ") + "." : "";
+  const box = $("findings");
+  box.innerHTML = D.findings.length ? "" : `<div class='note'>Nothing above ${fmt(D.threshold_um)} µm.</div>`;
+  D.findings.forEach(f => {
+    const d = document.createElement("div");
+    d.className = "finding" + (f.id === state.sel ? " sel" : "");
+    d.innerHTML = `<b>#${f.id}</b> · up to ${fmt(f.peak_um)} µm thick · ${fmt(f.area_mm2, 2)} mm²` +
+      `<small>${fmt(Math.abs(f.x_mm), 1)} mm ${f.x_mm >= 0 ? "right" : "left"} of centre, scan ${f.scan + 1} · extra volume ${fmt(f.extra_volume_mm3, 3)} mm³ above ${fmt(D.threshold_um)} µm</small>`;
+    d.onclick = () => selectFinding(f.id);
+    box.appendChild(d);
+  });
+  const pins = $("pins"); pins.innerHTML = "";
+  D.findings.forEach(f => { const d = document.createElement("div"); d.className = "pin" + (f.id === state.sel ? " sel" : ""); d.textContent = f.id; d.dataset.id = f.id; d.onclick = () => selectFinding(f.id); pins.appendChild(d); });
+}
+function nearestSlice(scan) { let best = 0; D.slices.forEach((s, i) => { if (Math.abs(s.scan - scan) < Math.abs(D.slices[best].scan - scan)) best = i; }); return best; }
+function selectFinding(id) {
+  state.sel = id; const f = D.findings.find(f => f.id === id);
+  ui.slice.value = nearestSlice(f.scan); state.probe = { u: f.u, v: f.v };
+  flyTo({ target: worldOf(f.u, f.v, at(ILM, f.u, f.v)), dist: 7, yaw: 0.5, pitch: 0.6 });
+  renderSide(); syncOutputs(); drawBscan(); redraw();
+}
+
+// ---------------------------------------------------------------- the 2-D B-scan with the found lines
+function drawBscan() {
+  const i = Number(ui.slice.value), img = sliceImg[i]; if (!img) return;
+  const c = $("bscan"), ctx = c.getContext("2d"), w = 680, h = Math.round(w * img.height / img.width);
+  c.width = w; c.height = h; ctx.drawImage(img, 0, 0, w, h);
+  const v = sliceV();
+  for (const [grid, color] of [[ILM, "#59c8ff"], [LOW, "#ffd84d"]]) {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
+    for (let x = 0; x <= w; x += 4) { const y = at(grid, x / w, v) / 1000 / DEPTH * h; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  }
+  if (state.probe && Math.abs(state.probe.v - v) < 0.6 / D.scans + 1e-6) {   // the clicked spot, if it lies on this scan
+    const x = state.probe.u * w; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+// ---------------------------------------------------------------- camera
+function camera() {
+  const cp = Math.cos(state.pitch), offset = [cp * Math.sin(state.yaw), Math.sin(state.pitch), cp * Math.cos(state.yaw)];
+  const eye = add(state.target, mul(offset, state.dist)), fwd = norm(sub(state.target, eye));
+  const right = norm(cross(fwd, [0, 1, 0])), up = cross(right, fwd);
+  const aspect = canvas.width / canvas.height, fov = 40 * Math.PI / 180;
+  return { eye, fwd, right, up, aspect, fov, mvp: matMul(perspective(fov, aspect, 0.05, 200), lookAt(eye, right, up, fwd)) };
+}
+const far = Math.max(W, L) * 2.1;
+const VIEWS = { three: { target: [0, 0, 0], dist: far, yaw: 0.6, pitch: 0.5 }, top: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 1.5 },
+                front: { target: [0, 0, 0], dist: far, yaw: 0, pitch: 0.12 } };
+function setView(name) { flight = null; Object.assign(state, JSON.parse(JSON.stringify(VIEWS[name]))); redraw(); }
+let flight = null;
+function flyTo(goal) {
+  const from = { target: state.target.slice(), dist: state.dist, yaw: state.yaw, pitch: state.pitch }, t0 = performance.now();
+  let dyaw = goal.yaw - from.yaw; dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));
+  flight = now => {
+    const t = Math.min(1, (now - t0) / 500), s = t * t * (3 - 2 * t);
+    state.target = add(from.target, mul(sub(goal.target, from.target), s));
+    state.dist = from.dist + (goal.dist - from.dist) * s; state.yaw = from.yaw + dyaw * s; state.pitch = from.pitch + (goal.pitch - from.pitch) * s;
+    if (t >= 1) flight = null; redraw();
+  };
+}
+
+// ---------------------------------------------------------------- clicking: walk along the ray until it dips below the surface
+function pick(clientX, clientY) {
+  const box = canvas.getBoundingClientRect(), cam = camera(), k = Math.tan(cam.fov / 2);
+  const nx = (clientX - box.left) / box.width * 2 - 1, ny = 1 - (clientY - box.top) / box.height * 2;
+  const dir = norm(add(cam.fwd, add(mul(cam.right, nx * k * cam.aspect), mul(cam.up, ny * k))));
+  const cutV = ui.cut.checked && ui.showSlice.checked ? sliceV() : 2;
+  for (let t = 0.1; t < state.dist * 3 + 20; t += 0.01) {
+    const p = add(cam.eye, mul(dir, t)), u = p[0] / W + 0.5, v = p[2] / L + 0.5;
+    if (u < 0 || u > 1 || v < 0 || v > 1 || v > cutV) continue;
+    if (p[1] <= height(at(ILM, u, v))) return { u, v };
+  }
+  return null;
+}
+function probe(hit) {
+  const box = $("probe"); state.probe = hit;
+  if (!hit) { box.textContent = "That is not on the scanned surface."; drawBscan(); return; }
+  const th = at(THICK, hit.u, hit.v), x = (hit.u - 0.5) * W, z = (hit.v - 0.5) * L, scan = Math.min(D.scans - 1, Math.floor(hit.v * D.scans));
+  ui.slice.value = nearestSlice(scan);
+  box.innerHTML = `<strong>Retina thickness here: ${fmt(th)} µm</strong> (median of this scan: ${fmt(D.thickness_um.median)} µm).<br>` +
+    `${fmt(Math.abs(x), 2)} mm ${x >= 0 ? "right" : "left"} of the centre, ${fmt(Math.abs(z), 2)} mm ${z >= 0 ? "toward the last" : "toward the first"} scan (B-scan ${scan + 1}). ` +
+    `Inner surface ${fmt(at(ILM, hit.u, hit.v))} µm below the top of the scan.`;
+  syncOutputs(); drawBscan(); redraw();
+}
+
+// ---------------------------------------------------------------- mouse / touch
+const pointers = new Map(); let moved = 0, pinch = 0;
+canvas.addEventListener("pointerdown", e => { canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]); moved = 0; pinch = 0; canvas.classList.add("drag"); });
+canvas.addEventListener("pointermove", e => {
+  const last = pointers.get(e.pointerId); if (!last) return;
+  const dx = e.clientX - last[0], dy = e.clientY - last[1];
+  pointers.set(e.pointerId, [e.clientX, e.clientY]); moved += Math.abs(dx) + Math.abs(dy);
+  if (pointers.size === 2) { const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) state.dist = Math.min(60, Math.max(1, state.dist * pinch / d)); pinch = d; }
+  else { flight = null; state.yaw -= dx * 0.006; state.pitch = Math.max(-0.2, Math.min(1.55, state.pitch + dy * 0.006)); }
+  redraw();
+});
+const release = e => { if (pointers.delete(e.pointerId) && e.type === "pointerup" && moved < 5 && pointers.size === 0) probe(pick(e.clientX, e.clientY)); if (!pointers.size) canvas.classList.remove("drag"); };
+canvas.addEventListener("pointerup", release); canvas.addEventListener("pointercancel", release);
+canvas.addEventListener("wheel", e => { e.preventDefault(); flight = null; state.dist = Math.min(60, Math.max(1, state.dist * Math.exp(e.deltaY * 0.0012))); redraw(); }, { passive: false });
+document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.view));
+
+// ---------------------------------------------------------------- drawing one frame
+function drawSurface(m, lower, cam) {
+  gl.useProgram(surface);
+  const U = n => gl.getUniformLocation(surface, n), A = (n, b, size) => { const loc = gl.getAttribLocation(surface, n); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0); };
+  A("aUV", bufUV, 2); A("aDepth", m.depth, 1); A("aSlope", m.slope, 2); A("aThick", bufThick, 1);
+  gl.uniformMatrix4fv(U("uMVP"), false, cam.mvp); gl.uniform3f(U("uSize"), W, L, D0); gl.uniform1f(U("uStretch"), stretch());
+  gl.uniform1f(U("uThr"), Number(ui.thr.value)); gl.uniform1f(U("uMax"), tMax); gl.uniform1f(U("uOpacity"), Number(ui.opacity.value));
+  gl.uniform1i(U("uLower"), lower ? 1 : 0); gl.uniform1i(U("uCut"), ui.cut.checked && ui.showSlice.checked ? 1 : 0); gl.uniform1f(U("uCutV"), sliceV() + 0.25 / D.scans);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, enFaceTex); gl.uniform1i(U("uEnFace"), 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIndex); gl.drawElements(gl.TRIANGLES, index.length, gl.UNSIGNED_SHORT, 0);
+}
+function drawLines(segments, color, cam) {
+  gl.useProgram(lines);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufLines); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(segments), gl.DYNAMIC_DRAW);
+  const loc = gl.getAttribLocation(lines, "aPos"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+  gl.uniformMatrix4fv(gl.getUniformLocation(lines, "uMVP"), false, cam.mvp); gl.uniform4fv(gl.getUniformLocation(lines, "uColor"), color);
+  gl.drawArrays(gl.LINES, 0, segments.length / 3);
+}
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (flight) flight(now);
+  const w = Math.round(canvas.clientWidth * devicePixelRatio), h = Math.round(canvas.clientHeight * devicePixelRatio);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; state.dirty = true; }
+  if (!state.dirty || !enFaceTex || !w || !h) return;
+  state.dirty = false;
+  const cam = camera(), s = stretch(), top = D0 * s, bottom = (D0 - DEPTH) * s;
+  gl.viewport(0, 0, w, h); gl.clearColor(0.055, 0.067, 0.086, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+  drawSurface(mesh.ilm, false, cam);
+  if (ui.showLow.checked) drawSurface(mesh.low, true, cam);
+
+  const z = (sliceV() - 0.5) * L;
+  if (ui.showSlice.checked) {     // the upright B-scan, with the scan picture on it
+    gl.useProgram(slab);
+    // A strip from just above the inner surface down to the bottom of the scan, so the empty
+    // (black) space above the retina does not hide the surface behind the B-scan.
+    const strip = [], v = sliceV(), N = 96;
+    for (let i = 0; i <= N; i++) {
+      const u = i / N, dTop = Math.max(0, at(ILM, u, v) / 1000 - 0.04);
+      strip.push((u - 0.5) * W, (D0 - dTop) * s, z, u, dTop / DEPTH,  (u - 0.5) * W, bottom, z, u, 1);
+    }
+    const quad = new Float32Array(strip);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufSlab); gl.bufferData(gl.ARRAY_BUFFER, quad, gl.DYNAMIC_DRAW);
+    const aPos = gl.getAttribLocation(slab, "aPos"), aTex = gl.getAttribLocation(slab, "aTex");
+    gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 20, 12);
+    gl.uniformMatrix4fv(gl.getUniformLocation(slab, "uMVP"), false, cam.mvp);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sliceTex[Number(ui.slice.value)]); gl.uniform1i(gl.getUniformLocation(slab, "uScan"), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, quad.length / 5);
+  }
+  // The box of the scanned volume, the outline of the B-scan, and a stalk under each pin.
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  const box = [], X = W / 2, Z = L / 2;
+  for (const y of [top, bottom]) box.push(-X, y, -Z, X, y, -Z,  X, y, -Z, X, y, Z,  X, y, Z, -X, y, Z,  -X, y, Z, -X, y, -Z);
+  for (const [x, zz] of [[-X, -Z], [X, -Z], [X, Z], [-X, Z]]) box.push(x, top, zz, x, bottom, zz);
+  drawLines(box, [0.75, 0.82, 0.95, 0.22], cam);
+  if (ui.showSlice.checked) drawLines([-X, top, z, X, top, z,  X, top, z, X, bottom, z,  X, bottom, z, -X, bottom, z,  -X, bottom, z, -X, top, z], [0.42, 0.77, 1, 0.9], cam);
+  const tips = [], stalks = [];
+  for (const f of D.findings) {
+    const base = worldOf(f.u, f.v, at(ILM, f.u, f.v)), tip = add(base, [0, 0.12 * Math.max(W, L), 0]);
+    tips.push([f.id, tip]); stalks.push(...base, ...tip);
+  }
+  if (state.probe) { const b = worldOf(state.probe.u, state.probe.v, at(ILM, state.probe.u, state.probe.v)); drawLines([...b, ...add(b, [0, 0.08 * Math.max(W, L), 0])], [1, 1, 1, 1], cam); }
+  if (ui.pinsOn.checked) drawLines(stalks, [1, 0.35, 0.28, 0.9], cam);
+  for (const [id, tip] of tips) {
+    const el = document.querySelector(`.pin[data-id="${id}"]`); if (!el) continue;
+    const m = cam.mvp, x = m[0] * tip[0] + m[4] * tip[1] + m[8] * tip[2] + m[12], y = m[1] * tip[0] + m[5] * tip[1] + m[9] * tip[2] + m[13], wc = m[3] * tip[0] + m[7] * tip[1] + m[11] * tip[2] + m[15];
+    const on = wc > 0.05 && Math.abs(x / wc) < 1 && Math.abs(y / wc) < 1;
+    el.style.display = on ? "" : "none";
+    if (on) { el.style.left = (x / wc * 0.5 + 0.5) * canvas.clientWidth + "px"; el.style.top = (0.5 - y / wc * 0.5) * canvas.clientHeight + "px"; }
+  }
+}
+
+// ---------------------------------------------------------------- start
+(async () => {
+  ui.thr.min = Math.floor(tMin); ui.thr.max = Math.ceil(tMax); ui.thr.value = Math.round(D.threshold_um);
+  ui.slice.max = D.slices.length - 1; ui.slice.value = nearestSlice(D.findings.length ? D.findings[0].scan : Math.floor(D.scans / 2));
+  enFaceTex = makeTexture(await loadImage(D.en_face));
+  const images = await Promise.all(D.slices.map(s => loadImage(s.img)));
+  images.forEach((im, i) => { sliceImg[i] = im; sliceTex[i] = makeTexture(im); });
+  setView("three"); renderSide(); syncOutputs(); drawBscan(); requestAnimationFrame(frame);
+  window.addEventListener("resize", redraw);
+})();
+</script>
+</body>
+</html>

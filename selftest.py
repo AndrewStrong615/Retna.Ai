@@ -700,6 +700,72 @@ def test_eye3d():
           and plain[0] is plain[1])
 
 
+def test_oct3d(tmp):
+    """oct3d.py: the surface finder against a volume with a known answer, the readers, and the page."""
+    import itertools
+    import struct
+    from oct3d import best_path, find_layers, load_volume, synthetic_volume, thick_findings, default_threshold
+    # Dynamic programming must find the same best path as trying every path (tiny case: 4^5 paths).
+    rng = np.random.default_rng(0)
+    score = rng.normal(size=(1, 4, 5)).astype(np.float32)
+    def total(path):
+        moves = [abs(a - b) for a, b in zip(path, path[1:])]
+        return -np.inf if max(moves) > 1 else sum(score[0, z, x] for x, z in enumerate(path)) - 0.5 * sum(moves)
+    brute = max(itertools.product(range(4), repeat=5), key=total)
+    check("oct3d: dynamic programming finds the same best path as trying all 1,024 paths",
+          tuple(best_path(score, jump=1, bend_cost=0.5)[0]) == brute)
+    vol, spacing, true_ilm, true_low = synthetic_volume()
+    ilm, low = find_layers(vol, spacing)
+    err_ilm, err_low = np.abs(ilm - true_ilm).mean() * spacing["dz"], np.abs(low - true_low).mean() * spacing["dz"]
+    check("oct3d: both surfaces of the synthetic volume found within 8 um on average (pixel = 7.8 um)",
+          err_ilm < 8 and err_low < 8, f"ILM {err_ilm:.1f} um, lower {err_low:.1f} um")
+    thick = (low - ilm) * spacing["dz"]
+    found, _ = thick_findings(thick, spacing, default_threshold(thick))
+    f = found[0] if found else {}
+    check("oct3d: the one swollen area is found where it was drawn (1.5 mm right, 1 mm toward the first scan, ~500 um)",
+          len(found) == 1 and abs(f["x_mm"] - 1.5) < 0.15 and abs(f["y_mm"] + 1.0) < 0.15 and abs(f["peak_um"] - 500) < 25)
+    # Readers. Folder: numbers in names order the scans (2 before 10); mixed sizes refused.
+    folder = os.path.join(tmp, "oct_folder")
+    os.makedirs(folder)
+    for i in range(12):
+        Image.fromarray(vol[i]).save(os.path.join(folder, f"scan_{i}.png"))
+    read, sp, _ = load_volume(folder, 6.0, 1.5, 2.0)
+    Image.fromarray(vol[0][:100]).save(os.path.join(folder, "scan_99.png"))
+    code, log = run(["oct3d.py", "--scan", folder, "--out", os.path.join(tmp, "oct_bad")])
+    check("oct3d: a folder of B-scans is read in numeric order with the given size; mixed sizes refused",
+          np.array_equal(read, vol[:12]) and sp["assumed"] and abs(sp["dy"] - 125) < 1e-6
+          and code != 0 and "different sizes" in log)
+    # Heidelberg .vol: write a small file in the published layout and read it back.
+    n, z, x, hdr = 3, 40, 32, 512
+    head = bytearray(2048)
+    head[:12] = b"HSF-OCT-103\0"
+    struct.pack_into("<iiidddii", head, 12, x, n, z, 0.0115, 0.12, 0.0039, 8, 8)
+    struct.pack_into("<i", head, 100, hdr)
+    data = rng.random((n, z, x)).astype("<f4")
+    lines = np.stack([np.full((n, x), 10.0), np.full((n, x), 30.0)], axis=1).astype("<f4")   # device ILM, Bruch's
+    blob = bytes(head) + bytes(64)
+    for b in range(n):
+        bh = bytearray(hdr)
+        struct.pack_into("<ii", bh, 48, 2, 64)
+        bh[64:64 + 2 * x * 4] = lines[b].tobytes()
+        blob += bytes(bh) + data[b].tobytes()
+    vol_path = os.path.join(tmp, "eye.vol")
+    open(vol_path, "wb").write(blob)
+    read, sp, device = load_volume(vol_path)
+    check("oct3d: a .vol file in the published layout reads back (sizes, spacing in um, picture, device lines)",
+          read.shape == (n, z, x) and abs(sp["dx"] - 11.5) < 1e-3 and abs(sp["dz"] - 3.9) < 1e-3 and not sp["assumed"]
+          and np.array_equal(read, (data ** 0.25 * 255).astype(np.uint8))
+          and device is not None and np.allclose(device[0], 10) and np.allclose(device[1], 30))
+    out = os.path.join(tmp, "oct_demo")
+    code, log = run(["oct3d.py", "--demo", "--out", out])
+    page = open(os.path.join(out, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
+    again, _ = run(["oct3d.py", "--demo", "--out", out])
+    check("oct3d.py --demo writes the page, layers.npz and summary.json; refuses to overwrite",
+          code == 0 and "/*OCT_DATA*/" not in page and '"ilm_um"' in page
+          and os.path.exists(os.path.join(out, "layers.npz"))
+          and len(json.load(open(os.path.join(out, "summary.json")))["findings"]) == 1 and again != 0)
+
+
 def test_vit():
     from vit import _checks
     for name, ok in _checks().items():
@@ -713,6 +779,7 @@ def main():
     test_ordinal_loss()
     with tempfile.TemporaryDirectory() as tmp:
         test_saving(tmp)
+        test_oct3d(tmp)
         test_end_to_end(tmp)
     print()
     if failures:
