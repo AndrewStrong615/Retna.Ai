@@ -638,6 +638,66 @@ def test_end_to_end(tmp):
         code, log = run(["heatmap.py", "--run", out, "--images", tight, "--per-group", "1"])
         pngs = os.listdir(os.path.join(out, "heatmaps")) if code == 0 else []
         check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
+        # The 3D eye page: same eyes as heatmap.py, written as one web page plus a table.
+        code, log = run(["eye3d.py", "--run", out, "--images", tight, "--per-group", "1"])
+        if code != 0:
+            print(log[-3000:])
+        view = os.path.join(out, "eye3d")
+        page = open(os.path.join(view, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
+        table = json.load(open(os.path.join(view, "findings.json"))) if code == 0 else {"eyes": []}
+        val_names = set(pd.read_csv(os.path.join(out, "val_predictions.csv"))["image"].astype(str))
+        check("eye3d.py writes the 3D page (photos embedded, marker filled) for validation eyes only",
+              code == 0 and "/*EYE_DATA*/" not in page and page.count("data:image/jpeg;base64,") == len(table["eyes"]) > 0
+              and all(e["name"] in val_names for e in table["eyes"]))
+        code, log = run(["eye3d.py", "--run", out, "--images", tight, "--image",
+                         str(pd.read_csv(os.path.join(out, "test_split.csv"))["image"].iloc[0])])
+        check("eye3d.py refuses test images", code != 0 and "TEST images" in log)
+
+
+def test_eye3d():
+    """The hand-written pieces of eye3d.py, on pictures whose right answer is known."""
+    from eye3d import MultiScaleCAM, find_findings, label_regions, vessel_sketch
+    from heatmap import GradCAM
+    from model import build_model
+    # Regions: two blobs joined only by a corner count as one; a separate pixel is its own.
+    mask = np.zeros((6, 6), dtype=bool)
+    mask[0:2, 0:2] = mask[2:4, 2:4] = mask[5, 5] = True
+    labels, count = label_regions(mask)
+    check("eye3d: connected regions (corner contact joins, gaps separate)",
+          count == 2 and labels[0, 0] == labels[3, 3] != labels[5, 5] and (labels > 0).sum() == mask.sum())
+    # Vessel sketch: a long dark line is kept, a round dark blob is not.
+    rgb = np.full((128, 128, 3), 150, dtype=np.uint8)
+    rgb[62:65, 10:118] = 40                       # the "vessel"
+    yy, xx = np.mgrid[:128, :128]
+    blob = (yy - 100) ** 2 + (xx - 40) ** 2 < 8 ** 2
+    rgb[blob] = 40                                # the "hemorrhage"
+    eye = np.ones((128, 128), dtype=bool)
+    vessels = vessel_sketch(rgb, eye)
+    check("eye3d: vessel sketch keeps a thin dark line and drops a round dark blob",
+          vessels[63, 20:108].mean() > 0.9 and vessels[blob].mean() < 0.05)
+    # Findings: heat placed on the blob is reported there, as a dark spot, at the right clock position.
+    heat = np.exp(-((yy - 100) ** 2 + (xx - 40) ** 2) / (2 * 6.0 ** 2)).astype(np.float32)
+    found, numbered = find_findings(heat, rgb, eye, vessels)
+    f = found[0] if found else {}
+    check("eye3d: a hot dark blob becomes finding #1 (lower left = 7 o'clock, darker, not on a vessel)",
+          len(found) == 1 and f["clock"] == 7 and f["tone"] < -0.5 and f["on_vessel_pct"] < 30
+          and numbered[100, 40] == 1 and abs(f["x"] - (40 - 63.5) / 64) < 0.03 and abs(f["y"] - (63.5 - 100) / 64) < 0.03)
+    # Heat: the region map is exactly heatmap.py's Grad-CAM; the sharpened map stays in 0..1.
+    torch.manual_seed(0)
+    x = torch.randn(1, 3, 96, 96)
+    net_a, net_b = build_model().eval(), build_model().eval()
+    for m in net_a.modules():                     # a fresh network's blocks start as pass-throughs with a near-zero
+        if isinstance(m, torch.nn.BatchNorm2d):   # head; give it weights that make every layer matter
+            torch.nn.init.normal_(m.weight, 1.0, 0.2)
+    torch.nn.init.normal_(net_a.head.weight, 0, 1.0)
+    net_b.load_state_dict(net_a.state_dict())
+    old_map, old_peak, old_score = GradCAM(net_a)(x)
+    heat, coarse, peak, score = MultiScaleCAM(net_b, fine_stage=2)(x)
+    plain = MultiScaleCAM(build_model().eval(), fine_stage=0)(x)
+    check("eye3d: region map = heatmap.py's Grad-CAM; sharpened map in 0..1 with its peak at 1; stage 0 = plain",
+          np.allclose(coarse, old_map, atol=1e-6) and abs(peak - old_peak) < 1e-6 and abs(score - old_score) < 1e-6
+          and heat.min() >= 0 and abs(heat.max() - 1) < 1e-4 and not np.allclose(heat, coarse)
+          and plain[0] is plain[1])
 
 
 def test_vit():
@@ -649,6 +709,7 @@ def test_vit():
 def main():
     test_threshold()
     test_vit()
+    test_eye3d()
     test_ordinal_loss()
     with tempfile.TemporaryDirectory() as tmp:
         test_saving(tmp)

@@ -140,6 +140,16 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
 - `heatmap.py`: Grad-CAM written from scratch: for a finished run, colors where the model found evidence of
   disease on validation eyes (missed, false alarms, caught, cleared; refuses test images). Writes
   `<run>/heatmaps/*.png`. Each map is scaled to its own peak; the label's `peak` compares strength across eyes.
+- `eye3d.py` + `eye3d_viewer.html` (3D eye view; checked on synthetic eyes only, not yet run on a real model):
+  for a finished run, writes ONE web page `<run>/eye3d/viewer.html` (no internet, no library: hand-written WebGL) in
+  which each chosen validation eye (same choice rules as heatmap.py; refuses test images) is an eyeball you can turn:
+  the photo on the inside back wall, evidence in shades of red, numbered findings, click a spot to probe it.
+  Heat = heatmap.py's Grad-CAM (region, 32 px cells) x LayerCAM from stage 2 (detail, 8 px cells; `--fine-stage 0` =
+  plain Grad-CAM). Vessel sketch and "looks like" (on a vessel-like line / darker / brighter spot) are classical
+  hand-written filters, NOT trained models, and describe pixels, not diagnoses. The 3D is a PROJECTION: one photo has
+  no depth; the page assumes a round eye and that the photo covers `--cap-deg` 36 around the back pole (an assumption,
+  adjustable in the page). Real depth would need OCT. The page embeds the photos: never commit it. Also writes
+  `findings.json` (the same numbers as a table).
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
