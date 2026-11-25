@@ -82,6 +82,9 @@
          background:rgba(20,20,24,.85); border:2px solid var(--red); color:#fff; font-size:12px; font-weight:600;
          display:flex; align-items:center; justify-content:center; cursor:pointer; user-select:none; }
   .pin.sel { background:var(--red); border-color:#fff; }
+  #estBanner { position:absolute; left:50%; transform:translateX(-50%); bottom:64px; z-index:5; max-width:80%;
+    padding:8px 14px; border-radius:8px; background:rgba(122,45,38,.92); border:1px solid #ffb3aa; color:#fff;
+    font-weight:600; text-align:center; pointer-events:none; }
   #views { position:absolute; left:12px; top:12px; right:12px; display:flex; gap:6px; flex-wrap:wrap; }
   /* bottom line of the picture: three boxes side by side that wrap instead of overlapping */
   #hud { position:absolute; left:12px; right:12px; bottom:10px; display:flex; flex-wrap:wrap; gap:4px 18px; align-items:flex-end;
@@ -103,6 +106,8 @@
   <div id="stage">
     <canvas id="gl"></canvas>
     <div id="pins"></div>
+    <!-- shown only for pages written by photo2oct.py: nothing on such a page was measured -->
+    <div id="estBanner" style="display:none"></div>
     <div id="views">
     </div>
     <svg id="leaders"></svg>
@@ -582,6 +587,37 @@ function shapeDefaults() {
 for (const [id, value] of [["relief1", 1], ["relief5", 5]]) $(id).onclick = () => { ui.stretch.value = value; syncOutputs(); redraw(); };
 
 // ---------------------------------------------------------------- side panel
+// A page from photo2oct.py carries D.estimate: the "scan" was GUESSED from a photo. Then every text that says
+// "measured" or "raw data" would be a lie, so it is replaced, once, and a banner stays on the picture.
+let estimateShown = false;
+function showEstimate() {
+  const E = D.estimate;
+  if (!E || estimateShown) return;
+  estimateShown = true;
+  const a = E.assumed, how = E.method === "network" ? "a trained network's guess" : "the average healthy eye, not this eye";
+  $("estBanner").style.display = "";
+  $("estBanner").textContent = `ESTIMATED from a photo (${how}) · not a scan · not a measurement`;
+  document.querySelector("#side h1").textContent = "Estimated OCT view";
+  document.title = "Estimated OCT view";
+  document.querySelectorAll("#side h2").forEach(h => {
+    if (h.textContent.startsWith("Photo lined up")) h.textContent = "Where the estimate sits in the photo";
+    if (h.textContent.startsWith("Model hot spots")) { h.style.display = "none"; $("hotspots").style.display = "none"; }
+    if (h.textContent.startsWith("Thickened areas")) h.textContent = "Thickened areas (in the ESTIMATE, not measured)";
+    if (h.textContent.startsWith("B-scan")) h.textContent = "B-scan (DRAWN from the estimate, not data)";
+    if (h.textContent.startsWith("What this is")) {
+      for (let n = h.nextElementSibling; n; n = n.nextElementSibling) if (n.classList.contains("note")) n.style.display = "none";
+      const d = document.createElement("div");
+      d.className = "note";
+      d.innerHTML = `<strong>Nothing on this page was measured.</strong> A photo is flat and holds no depth. The thickness shown is ${E.basis} ` +
+        `<br><br><strong>From the photo:</strong> its own colours, and WHERE the map sits (optic disc and fovea found ${E.landmarks_typed ? "by hand" : "by a classical filter"}; check the picture above: circle = disc, cross = fovea, square = the estimated ${fmt(a.field_mm)} x ${fmt(a.field_mm)} mm). ` +
+        `<br><br><strong>Assumed:</strong> disc to fovea = ${fmt(a.disc_fovea_mm, 1)} mm (sets every mm here; the photo's width is then ${fmt(a.photo_width_mm, 1)} mm); the eye wall under the retina is ${a.eye_wall}; the curve of the shell. ` +
+        `<br><br><strong>The B-scans are drawings:</strong> layers ${a.layers}. The dark stripes are placed under the photo's vessels. Do not read layers, fluid or any finding off them.` +
+        `<br><br>Only a real OCT scan can show this eye's thickness. This is a teaching picture, not a diagnosis.`;
+      h.after(d);
+    }
+  });
+}
+
 function renderSide() {
   const t = D.thickness_um, s = D.spacing_um;
   $("source").textContent = D.source;
@@ -612,6 +648,8 @@ function renderSide() {
       `Vessel fit ${fmt(r.ncc, 2)} (1 = perfect); wrong maps reach ${fmt(r.control, 2)} by chance, so the real fit is ${fmt(r.ratio, 1)}x the control (needs ${fmt(r.min_ratio, 1)}x). ` +
       `Photo turned ${fmt(r.angle)}°, its width covers ${fmt(r.photo_mm_per_width, 1)} mm. Left: where the scan lies in the photo. Right: tiles of photo and scan; vessels should run unbroken across tile edges.` +
       (r.trusted ? "" : " <strong>The photo may not belong to this scan: do not rely on anything the photo adds here.</strong>");
+    showEstimate();
+    if (D.estimate) $("regText").innerHTML = `<span class="tag bad">estimated</span> The square is placed on the fovea by construction (no vessel matching was needed or done).`;
     const hb = $("hotspots");
     hb.innerHTML = F.heat_source ? (SPOTS.length ? "" : "<div class='note'>No hot spot of the heat map falls inside the scanned square.</div>") : "<div class='note'>No heat map was given (--heat).</div>";
     SPOTS.forEach(f => {

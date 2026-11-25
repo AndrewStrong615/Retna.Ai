@@ -837,6 +837,74 @@ def test_oct3d(tmp):
           and code_heat != 0 and "--heat needs --photo" in log_heat)
 
 
+def test_photo2oct(tmp):
+    """photo2oct.py: the atlas, the landmark finder, the network + training on cartoon pairs, and the ESTIMATED page."""
+    import torch
+    from PIL import Image
+    import photo2oct as p2o
+    import register as reg
+    from oct3d import synthetic_pair
+    atlas = p2o.atlas_thickness(64, "left")
+    c = (np.arange(64) + 0.5) / 64 * 6 - 3
+    r = np.hypot(*np.meshgrid(c, c))
+    check("photo2oct: the atlas has a pit at the fovea, a thicker ring ~1 mm out, is thicker toward the disc, and mirrors",
+          atlas[r < 0.2].mean() < 245 and 330 < atlas[(r > 0.9) & (r < 1.1)].mean() < 350
+          and atlas[:, :8].mean() > atlas[:, -8:].mean() + 10
+          and np.allclose(p2o.atlas_thickness(64, "right"), atlas[:, ::-1]))
+    # A cartoon photo with a bright disc; a dark fovea is painted where the cartoon scan's centre lies.
+    _, _, _, _, photo, _, true_matrix = synthetic_pair()
+    fx, fy = reg.scan_to_photo(true_matrix, 0.5, 0.5)
+    size = photo.shape[0]
+    yy, xx = np.mgrid[:size, :size]
+    spot = np.exp(-((xx - fx * size) ** 2 + (yy - fy * size) ** 2) / (2 * (0.035 * size) ** 2))[..., None]
+    photo = (photo * (1 - 0.4 * spot)).astype(np.uint8)
+    disc, fovea, contrast = p2o.find_landmarks(photo)
+    width_mm, nasal, matrix = p2o.placement(disc, fovea)
+    u, v = reg.scan_to_photo(matrix, 0.5, 0.5)
+    check("photo2oct: disc and fovea found where they were drawn; the 6 mm square is centred on the fovea",
+          abs(fovea[0] - fx) < 0.03 and abs(fovea[1] - fy) < 0.03 and disc[0] < 0.3 and nasal == "left" and contrast > 4
+          and abs(u - fovea[0]) < 1e-6 and abs(v - fovea[1]) < 1e-6 and abs(matrix[0][0] - 6 / width_mm) < 1e-9,
+          f"fovea {fovea[0]:.2f}, {fovea[1]:.2f} (drawn {fx:.2f}, {fy:.2f})")
+    net = p2o.build_net().eval()
+    with torch.no_grad():
+        first = net(torch.randn(2, 3, 128, 128))
+    weights = sum(q.numel() for q in net.parameters())
+    check("photo2oct: an untrained ThicknessNet answers exactly the atlas (correction 0), 64 x 64, ~120k weights",
+          first.shape == (2, 1, 64, 64) and float(first.abs().max()) == 0 and 80_000 < weights < 200_000, f"{weights:,} weights")
+    # Cartoon pairs: thicker where spots were drawn. The trained network must find that; the atlas cannot.
+    pairs, out = os.path.join(tmp, "p2o_pairs"), os.path.join(tmp, "p2o_net")
+    code, log = run(["photo2oct.py", "synthetic-pairs", "--out", pairs, "--eyes", "200"])
+    code2, log2 = run(["photo2oct.py", "train", "--pairs", pairs, "--out", out, "--epochs", "25"])
+    res = json.load(open(os.path.join(out, "results.json"))) if code2 == 0 else {}
+    again, _ = run(["photo2oct.py", "train", "--pairs", pairs, "--out", out, "--epochs", "1"])
+    _, _, patients = p2o.load_pairs(pairs) if code == 0 else (0, 0, [])
+    tr, va, te = p2o.split_patients(patients) if patients else (np.zeros(1, bool),) * 3
+    p = np.array(patients)
+    check("photo2oct train (cartoon pairs): split by patient; on held-out patients the network beats the atlas and the "
+          "mean map, and cuts the error of the thickest point by over 40%; refuses to train into the same folder twice",
+          code == 0 and code2 == 0 and again != 0 and not (set(p[tr]) & set(p[va]) | set(p[tr]) & set(p[te]) | set(p[va]) & set(p[te]))
+          and res["test_mae_um"] < 0.96 * min(res["test_mae_atlas_um"], res["test_mae_mean_map_um"])
+          and res["test_peak_error_um"] < 0.6 * res["test_peak_error_atlas_um"],
+          (f"error {res['test_mae_um']:.1f} um vs atlas {res['test_mae_atlas_um']:.1f}; thickest point off by "
+           f"{res['test_peak_error_um']:.0f} um vs {res['test_peak_error_atlas_um']:.0f}") if res else (log + log2)[-300:])
+    # The page: atlas and network estimates of the cartoon photo, both marked ESTIMATED.
+    photo_path = os.path.join(tmp, "p2o_photo.png")
+    Image.fromarray(photo).save(photo_path)
+    est = os.path.join(tmp, "p2o_est")
+    code, log = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est])
+    again, _ = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est])
+    code3, log3 = run(["photo2oct.py", "estimate", "--photo", photo_path, "--out", est + "_net", "--model", os.path.join(out, "model.pt")])
+    page = open(os.path.join(est, "viewer.html"), encoding="utf-8").read() if code == 0 else ""
+    info = json.load(open(os.path.join(est, "estimate.json"))) if code == 0 else {}
+    check("photo2oct estimate: writes the page marked ESTIMATED (banner code, 'estimate' data, no heat), the map and "
+          "landmarks.png; the atlas map is the atlas; the network version runs; refuses to overwrite",
+          code == 0 and again != 0 and code3 == 0 and '"estimate": {"method": "atlas"' in page and 'id="estBanner"' in page
+          and "Nothing on this page was measured" in page and info.get("method") == "atlas"
+          and np.allclose(np.load(os.path.join(est, "thickness_um.npy")), p2o.atlas_thickness(64, info["nasal"]))
+          and os.path.exists(os.path.join(est, "landmarks.png"))
+          and json.load(open(os.path.join(est + "_net", "estimate.json")))["method"] == "network", (log + log3)[-300:])
+
+
 def test_vit():
     from vit import _checks
     for name, ok in _checks().items():
@@ -851,6 +919,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_saving(tmp)
         test_oct3d(tmp)
+        test_photo2oct(tmp)
         test_end_to_end(tmp)
     print()
     if failures:

@@ -199,6 +199,31 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   data and switches. Real data caveat:
   OLIVES pairs OCT with NEAR-INFRARED fundus pictures (as recalled; verify on download), not the colour photos the
   model was trained on: fine for testing registration, out of domain for the model's heat.
+- `photo2oct.py` (photo -> ROUGH ESTIMATE of the macular OCT; real photos: only the atlas, on one internet photo):
+  a photo holds no depth, so this guesses. Two guessers. (1) ATLAS (works now, nothing trained): finds the optic disc
+  (brightest blob) and the fovea (darkest smooth spot beside it) with classical filters and lays the thickness map of
+  an AVERAGE HEALTHY eye (pit 225 um, ring ~345 um at 1 mm, thicker toward the disc; approximate published Spectralis
+  averages typed in from memory, verify against Grover et al. 2010 before quoting) on a 6 x 6 mm square at the fovea.
+  The photo decides only WHERE the map goes; it is the same map for every eye and can never show swelling.
+  (2) `ThicknessNet` (hand-written U-Net, 118,593 weights, random start, last layer zero so untrained = the atlas):
+  predicts the DIFFERENCE from the atlas from the 128 px macula crop (mirrored so the disc is on the left), 64 x 64,
+  L1 loss. Needs PAIRS (photo + real OCT of the same eye): none exist here yet. Checked on cartoon pairs only
+  (`synthetic-pairs`: thicker where spots are drawn, plus a +-15 um offset nothing in the picture reveals): held-out
+  error ~13-14 um vs atlas ~16-17, thickest point off by ~45 um vs ~104. A cartoon-trained network says NOTHING about
+  a real photo. `train --pairs D --out R`: split by PATIENT 70/15/15, best epoch on validation, test patients scored
+  once against two no-network yardsticks (atlas, mean training map). `make-pair --oct <oct3d.py --photo folder> --photo
+  P --patient ID --nasal left|right --pairs D`: one real pair (needs a TRUSTED registration and a ~6 x 6 mm scan).
+  `estimate --photo P --out D [--model M] [--disc x y --fovea x y]`: writes thickness_um.npy, landmarks.png (check it),
+  estimate.json and the oct3d page with `estimate` data: a banner "ESTIMATED from a photo", all "measured" texts
+  replaced; its B-scans are DRAWN from the estimate (layers at fixed fractions, shadows under the photo's vessels).
+  Assumed: disc-fovea 4.5 mm (sets every mm), flat eye wall. First real photo tried: scikit-image's sample retina
+  (Wikimedia Commons "Fundus photograph of normal left eye", Haggstrom, CC0): landmarks right, atlas centre 275 um.
+  Real pairs, licences checked 2026-11-25: OLIVES (Zenodo 7105232, CC BY 4.0, 33.9 GB, 96 DR/DME eyes, 1,268 NEAR-INFRARED
+  fundus pictures each with 49 B-scans: best first training set, but not colour photos); GAMMA (300 COLOUR photo + OCT
+  pairs, 3 x 3 mm scans, glaucoma, CC BY-NC-ND, official host gamma.grand-challenge.org; Hugging Face copies are third
+  party); Harvard FairVision (30,000 SLO + OCT, CC BY-NC-ND, non-commercial research only, ~600 GB); MultiEYE is
+  UNPAIRED. Published yardstick: Holmberg et al. 2020, ~97,000 infrared pairs, mean error 33 um (50-61 um on thick
+  retinas). Never commit pairs, real photos or pages.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
