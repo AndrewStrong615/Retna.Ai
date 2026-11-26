@@ -102,6 +102,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   = the fresh clinic for E1-E3; sealed 400 (the challenge's validation part) = the final screener run only.
 - `convert_paraguay.py`: the Paraguay set (Zenodo 4647952 v0.2, CC BY 4.0, 757 photos, Zeiss Visucam) 7-step
   grade folders -> 0-4 labels CSV; each photo its own patient. 187 grade 0 only: E1 only.
+- `convert_sustech.py`: the SUSTech-SYSU set (figshare 12570770, CC BY 4.0, Shenzhen, 1,219 photos, cite Lin et al. 2020)
+  -> flat folder + labels CSV (`su<nnnn>` names); grade 5 (laser scars) replaced by the dataset's own 0-4 re-grades.
+  631 grade 0, 46% referable; each photo its own patient (eye side only). Fresh clinic: E1-E3.
 - `kaggle_e0.ipynb`: E0 without the laptop: on a Kaggle GPU from any browser, preprocess (512, enhance, tight
   mask), train the exp8 recipe as `kexp8` (~4.5 h), then `site_sim.py` (PREREG.md amendment 1). Save & Run All.
 - `PREREG.md`: the registered hypotheses and rules of the clinic set-up study, committed before each run.
