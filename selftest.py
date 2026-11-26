@@ -640,10 +640,17 @@ def test_end_to_end(tmp):
         check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
 
     # site_sim.py (E0, pretend clinics): runs, records every draw, resumes to the same file, refuses a rerun.
-    run_o = os.path.join(tmp, "run_ordinal")
+    # Its own, larger synthetic set: the shared one's validation half is too small to hold both classes.
+    sim_data = os.path.join(tmp, "synthetic_sim")
+    run(["make_synthetic_data.py", "--out", sim_data, "--patients", "300", "--seed", "1"])
+    sim_img = os.path.join(sim_data, "processed_64")
+    run(["preprocess.py", "--src", os.path.join(sim_data, "raw"), "--dst", sim_img, "--size", "64", "--workers", "2"])
+    sim_run = os.path.join(tmp, "run_sim")
+    run(["train.py", "--labels", os.path.join(sim_data, "trainLabels.csv"), "--images", sim_img, "--size", "64",
+         "--epochs", "2", "--batch", "16", "--workers", "0", "--out", sim_run])
     sim = os.path.join(tmp, "e0_sim")
-    sim_args = ["site_sim.py", "--run", run_o, "--images", processed, "--out", sim, "--rates", "0.25", "0.5",
-                "--n-setup", "4", "--draws", "2", "--n-healthy", "5", "--fake-rate", "0.25", "--batch", "4"]
+    sim_args = ["site_sim.py", "--run", sim_run, "--images", sim_img, "--out", sim, "--rates", "0.1", "0.4",
+                "--n-setup", "10", "--draws", "2", "--n-healthy", "20", "--fake-rate", "0.1", "--batch", "8"]
     code_s, log_s = run(sim_args)
     if code_s != 0:
         print(log_s[-3000:])

@@ -30,7 +30,7 @@ Plus one "fake camera" check at the training disease rate (--fake-rate): every p
 sigma 1.0, JPEG quality 40; registered in PREREG.md before any run), to see whether AdaBN
 undoes a known camera shift at home.
 
-Cost: everything runs on a CPU (the cloud). Plain view only (no 8-view TTA): each AdaBN
+Cost: runs on a GPU when there is one (Kaggle), else on the CPU (cloud, ~20 photos/s), always fp32. Plain view only (no 8-view TTA): each AdaBN
 draw needs a full new pass over the scored clinic, and TTA would cost 8x. The cutoff is
 therefore the PLAIN-view 90%-sensitivity cutoff, recomputed here on all validation eyes
 with this CPU's own scores (self-check: their AUC must match the run's val_predictions.csv).
@@ -101,16 +101,20 @@ class PhotoCache:
             yield ((x - self.mean) / self.std).contiguous(memory_format=torch.channels_last), None
 
 
+DEVICE = torch.device("cpu")   # set in main(): a GPU when there is one (Kaggle), else the CPU (cloud)
+
+
 @torch.no_grad()
 def plain_scores(model, cache, names, batch):
     model.eval()
-    return np.concatenate([model(x).float().numpy() for x, _ in cache.batches(names, batch)]).astype(np.float64)
+    return np.concatenate([model(x.to(DEVICE)).float().cpu().numpy()
+                           for x, _ in cache.batches(names, batch)]).astype(np.float64)
 
 
 def adabn_copy(model, cache, names, batch):
     """M1: a copy of the model whose BatchNorm statistics were re-measured on `names`."""
     adapted = copy.deepcopy(model)
-    adapt_batchnorm(adapted, list(cache.batches(names, batch)), torch.device("cpu"), False)
+    adapt_batchnorm(adapted, list(cache.batches(names, batch)), DEVICE, False)   # fp32, no autocast
     return adapted
 
 
@@ -182,9 +186,9 @@ def verdicts(draws, m0, rates, fake_rate):
                       "shift_without_adabn": d0, "median_shift_with_adabn": d1,
                       "pass": None if d0 < 0.05 else d1 <= 0.5 * d0}
     low = [r for r in rates if r <= 0.20]
-    worst = min(float(clean[clean["rate"] == r]["sens"].median()) for r in low)
+    worst = min(float(clean[clean["rate"] == r]["sens"].median()) for r in low) if low else None
     out["stop_rule"] = {"rule": "plain AdaBN is called UNSAFE if its median sensitivity at any p <= 20% is below 85%",
-                        "lowest_median_sens_at_p_le_20": worst, "unsafe": worst < 0.85}
+                        "lowest_median_sens_at_p_le_20": worst, "unsafe": None if worst is None else worst < 0.85}
     return out
 
 
@@ -202,16 +206,19 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--threads", type=int, default=None)
+    p.add_argument("--device", default="auto", help="auto (GPU if available), cpu or cuda")
     args = p.parse_args()
+    global DEVICE
+    DEVICE = torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device)
     if args.threads:
         torch.set_num_threads(args.threads)
     os.makedirs(args.out, exist_ok=True)
     if os.path.exists(os.path.join(args.out, "e0_results.json")):
         raise SystemExit(f"{args.out} already holds finished results; use a new --out.")
 
-    settings = {k: v for k, v in vars(args).items() if k not in ("threads",)}
+    settings = {k: v for k, v in vars(args).items() if k not in ("threads", "device", "batch")}
     settings.update(fake_camera={"gamma": FAKE_GAMMA, "blur_sigma": FAKE_BLUR_SIGMA, "jpeg_quality": FAKE_JPEG_QUALITY},
-                    view="plain", device="cpu")
+                    view="plain", precision="fp32")
     settings_path = os.path.join(args.out, "settings.json")
     if os.path.exists(settings_path):                     # resuming: the settings must not change
         with open(settings_path) as f:
@@ -225,7 +232,8 @@ def main():
     arch = ckpt.get("arch", {})
     model = build_model(depth=arch.get("depth", 18), pool=arch.get("pool", "avg"), dropout=arch.get("dropout", 0.2))
     model.load_state_dict(ckpt["model"])
-    model = model.to(memory_format=torch.channels_last).eval()
+    model = model.to(DEVICE, memory_format=torch.channels_last).eval()
+    print(f"Device: {DEVICE}")
     size = ckpt["size"]
     val["half"] = two_halves(val["patient"].to_numpy(), args.seed)
     pool = val[val["half"] == 0].reset_index(drop=True)
@@ -236,6 +244,8 @@ def main():
     healthy = clinic[~clinic["sick"]]
     keep = healthy.iloc[np.sort(rng.choice(len(healthy), min(args.n_healthy, len(healthy)), replace=False))]
     clinic = pd.concat([clinic[clinic["sick"]], keep]).sort_values("image").reset_index(drop=True)
+    if clinic["sick"].nunique() < 2:
+        raise SystemExit("The scored clinic needs both sick and healthy eyes; this validation set is too small.")
     print(f"Validation: {len(val)} eyes. Set-up pool (half 0): {len(pool)} eyes, {int(pool['sick'].sum())} sick. "
           f"Scored clinic (half 1): {len(clinic)} eyes, {int(clinic['sick'].sum())} sick + {len(keep)} healthy.")
 

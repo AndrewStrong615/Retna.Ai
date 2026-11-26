@@ -84,6 +84,8 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   all validation eyes; self-check: AUC = the run's val_predictions.csv). Plus a fixed fake camera (gamma 1.3,
   blur 1.0, JPEG 40). Plain view, CPU-friendly (~20 photos/s on 4 cores); resumable (draws.csv); writes
   e0_results.json with the registered verdicts; refuses a finished folder.
+- `kaggle_e0.ipynb`: E0 without the laptop: on a Kaggle GPU from any browser, preprocess (512, enhance, tight
+  mask), train the exp8 recipe as `kexp8` (~4.5 h), then `site_sim.py` (PREREG.md amendment 1). Save & Run All.
 - `PREREG.md`: the registered hypotheses and rules of the clinic set-up study, committed before each run.
 - `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
   `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate

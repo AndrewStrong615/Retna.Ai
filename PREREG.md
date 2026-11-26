@@ -75,4 +75,11 @@ as an amendment, before each one starts.
 
 ## Amendments
 
-(none yet)
+**1 (2026-11-26, before any real photo was scored).** The laptop, the only place exp15's weights exist, is out
+of reach. If E0 is run on Kaggle (`kaggle_e0.ipynb`) instead, the model is **kexp8**: a fresh run of the exp8
+recipe (512 px, enhance + tight mask, 60 epochs, GeM, ResNet-18, ordinal target, random start, no pretraining
+and no extra labels; laptop exp8 reached val AUC 0.896), trained on Kaggle's EyePACS copy with the same split.
+Everything else (design, hypotheses, rules, fake camera) is unchanged. It runs on the GPU in fp32 instead of the
+CPU, so the self-check compares with kexp8's own val_predictions.csv. Consequence for the reading: kexp8 is not
+the model scored on IDRiD, so E0 then speaks about AdaBN on this project's recipe, not about S15 itself; if the
+laptop comes back, E0 on exp15 can be run as registered and both are reported.
