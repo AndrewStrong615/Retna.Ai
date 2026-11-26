@@ -84,6 +84,24 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   all validation eyes; self-check: AUC = the run's val_predictions.csv). Plus a fixed fake camera (gamma 1.3,
   blur 1.0, JPEG 40). Plain view, CPU-friendly (~20 photos/s on 4 cores); resumable (draws.csv); writes
   e0_results.json with the registered verdicts; refuses a finished folder.
+- `site_study.py` (E1-E4 of the plan): pretend clinics on ANOTHER clinic's graded photos (halves by patient; set-up
+  batches at sick share p and size N, grades only build the batch). Methods: M1 AdaBN, M2 blended AdaBN
+  (`--prior-n`), M3 score reset, M4 referral-rate reset from a stated rate (`--stated-offset`), M5 AdaBN + EM
+  estimate of the batch's disease rate, REF graded reset (yardstick, not label-free); every row also has the
+  "unsure, refer" readouts. Reference (cutoff, scale, Platt fit) from EyePACS validation only. Refuses `--sealed`
+  photos; resumable; writes draws.csv + results.json (no verdicts: those are registered before each run).
+- `screening.py`: hand-written blocks shared by site_study.py and screen.py: blended BatchNorm, Platt fit + EM
+  disease-rate estimate (Saerens 2002), rate cutoff, unsure band (share of validation eyes near the cutoff) and
+  8-view disagreement. `python screening.py` runs its CPU checks (also in selftest).
+- `screen.py`: the screener as one tool. `setup` (ungraded clinic photos): AdaBN + quality reference re-measured on
+  the clinic's photos with the adapted model (cloud from one half, limit from the other); cutoff, scale and unsure
+  band copied from EyePACS validation. `screen`: one answer per photo: cannot_read / clear / refer / unsure_refer.
+  Measures nothing (no grades).
+- `convert_deepdrid.py`: DeepDRiD (CC BY-SA 4.0, Shanghai, 2,000 photos of 500 patients, 2 photos per eye, DR grade +
+  quality labels) -> flat folders per part + labels CSV (`dd<patient>_<view>` names). Parts: train 1,200 + eval 400
+  = the fresh clinic for E1-E3; sealed 400 (the challenge's validation part) = the final screener run only.
+- `convert_paraguay.py`: the Paraguay set (Zenodo 4647952 v0.2, CC BY 4.0, 757 photos, Zeiss Visucam) 7-step
+  grade folders -> 0-4 labels CSV; each photo its own patient. 187 grade 0 only: E1 only.
 - `kaggle_e0.ipynb`: E0 without the laptop: on a Kaggle GPU from any browser, preprocess (512, enhance, tight
   mask), train the exp8 recipe as `kexp8` (~4.5 h), then `site_sim.py` (PREREG.md amendment 1). Save & Run All.
 - `PREREG.md`: the registered hypotheses and rules of the clinic set-up study, committed before each run.
