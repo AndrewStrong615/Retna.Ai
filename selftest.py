@@ -639,6 +639,28 @@ def test_end_to_end(tmp):
         pngs = os.listdir(os.path.join(out, "heatmaps")) if code == 0 else []
         check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
 
+    # site_sim.py (E0, pretend clinics): runs, records every draw, resumes to the same file, refuses a rerun.
+    run_o = os.path.join(tmp, "run_ordinal")
+    sim = os.path.join(tmp, "e0_sim")
+    sim_args = ["site_sim.py", "--run", run_o, "--images", processed, "--out", sim, "--rates", "0.25", "0.5",
+                "--n-setup", "4", "--draws", "2", "--n-healthy", "5", "--fake-rate", "0.25", "--batch", "4"]
+    code_s, log_s = run(sim_args)
+    if code_s != 0:
+        print(log_s[-3000:])
+    draws_ok = False
+    if code_s == 0:
+        d = pd.read_csv(os.path.join(sim, "draws.csv"))
+        before = open(os.path.join(sim, "draws.csv")).read()
+        os.remove(os.path.join(sim, "e0_results.json"))
+        code_s2, log_s2 = run(sim_args)                       # resume: every draw already done
+        after = open(os.path.join(sim, "draws.csv")).read()
+        code_s3, log_s3 = run(sim_args)                       # finished: refused
+        res = json.load(open(os.path.join(sim, "e0_results.json")))
+        draws_ok = (len(d) == 3 * 2 * 2 and set(d["method"]) == {"M1", "M3"} and code_s2 == 0 and before == after
+                    and code_s3 != 0 and "already holds" in log_s3 and {"H0a", "H0b", "H0c", "stop_rule"} <= set(res["verdicts"]))
+    check("site_sim.py: self-check passes, every draw recorded, resume adds nothing, rerun refused, verdicts written",
+          code_s == 0 and "Self-check: val AUC" in log_s and draws_ok)
+
 
 def test_vit():
     from vit import _checks

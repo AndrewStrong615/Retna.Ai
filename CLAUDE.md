@@ -77,6 +77,14 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   EyePACS validation (no both-eyes, as external_test.py without `--pairs`). `score --site runs\site_X --images
   <photos> --out file.csv`: 8-view TTA with the adapted copies, standardized like validation, referred at both
   cutoffs. Reports nothing about accuracy (no grades): measuring AdaBN stays `external_test.py --adapt-bn`'s job.
+- `site_sim.py` (E0 of `PREREG.md`): pretend clinics from EyePACS VALIDATION eyes, to see whether AdaBN's effect
+  depends on the clinic's disease rate. Validation patients split in halves (seed 0): a set-up pool and a scored
+  clinic (its sick eyes + 1,000 healthy). Each draw: N ungraded set-up photos at sick share p (grades only build
+  the batch), then M1 AdaBN and M3 score reset are judged at the plain-view 90%-sensitivity cutoff (recomputed on
+  all validation eyes; self-check: AUC = the run's val_predictions.csv). Plus a fixed fake camera (gamma 1.3,
+  blur 1.0, JPEG 40). Plain view, CPU-friendly (~20 photos/s on 4 cores); resumable (draws.csv); writes
+  e0_results.json with the registered verdicts; refuses a finished folder.
+- `PREREG.md`: the registered hypotheses and rules of the clinic set-up study, committed before each run.
 - `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
   `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate
   names and grades outside 0-5. All of DDR is training data (our validation/test stay pure EyePACS).
