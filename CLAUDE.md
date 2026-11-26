@@ -272,7 +272,9 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   the averages: 24.6 um vs atlas 29.1 / mean map 33.8; centre sector 43 vs 52 / 64, centre correlation 0.50. So it
   HAS learned something coarse ("is the middle swollen"), which the per-cell error hid. Adding the sector loss
   (`--augment --sector-weight 1`, 60 epochs, validation only) did NOT help: map 26.9, sectors 26.5, centre 45.8.
-  Coarser targets alone are not the fix. Pretrained-encoder run: waiting for encoder.pt from the laptop.
+  Coarser targets alone are not the fix. STOPPED 2026-11-26 on andrew's word, before the
+  pretrained-encoder run: `--arch resnet18` (with or without `--init`) was never trained to the end on real pairs, and
+  the full selftest was not rerun after this code (the 3 new checks passed on their own).
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are
