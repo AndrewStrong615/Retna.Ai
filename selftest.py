@@ -639,6 +639,76 @@ def test_end_to_end(tmp):
         pngs = os.listdir(os.path.join(out, "heatmaps")) if code == 0 else []
         check("heatmap.py rebuilds a GeM / depth-34 model and writes pictures", code == 0 and len(pngs) > 0)
 
+    # site_sim.py (E0, pretend clinics): runs, records every draw, resumes to the same file, refuses a rerun.
+    # Its own, larger synthetic set: the shared one's validation half is too small to hold both classes.
+    sim_data = os.path.join(tmp, "synthetic_sim")
+    run(["make_synthetic_data.py", "--out", sim_data, "--patients", "300", "--seed", "1"])
+    sim_img = os.path.join(sim_data, "processed_64")
+    run(["preprocess.py", "--src", os.path.join(sim_data, "raw"), "--dst", sim_img, "--size", "64", "--workers", "2"])
+    sim_run = os.path.join(tmp, "run_sim")
+    run(["train.py", "--labels", os.path.join(sim_data, "trainLabels.csv"), "--images", sim_img, "--size", "64",
+         "--epochs", "2", "--batch", "16", "--workers", "0", "--out", sim_run])
+    sim = os.path.join(tmp, "e0_sim")
+    sim_args = ["site_sim.py", "--run", sim_run, "--images", sim_img, "--out", sim, "--rates", "0.1", "0.4",
+                "--n-setup", "10", "--draws", "2", "--n-healthy", "20", "--fake-rate", "0.1", "--batch", "8"]
+    code_s, log_s = run(sim_args)
+    if code_s != 0:
+        print(log_s[-3000:])
+    draws_ok = False
+    if code_s == 0:
+        d = pd.read_csv(os.path.join(sim, "draws.csv"))
+        before = open(os.path.join(sim, "draws.csv")).read()
+        os.remove(os.path.join(sim, "e0_results.json"))
+        code_s2, log_s2 = run(sim_args)                       # resume: every draw already done
+        after = open(os.path.join(sim, "draws.csv")).read()
+        code_s3, log_s3 = run(sim_args)                       # finished: refused
+        res = json.load(open(os.path.join(sim, "e0_results.json")))
+        draws_ok = (len(d) == 3 * 2 * 2 and set(d["method"]) == {"M1", "M3"} and code_s2 == 0 and before == after
+                    and code_s3 != 0 and "already holds" in log_s3 and {"H0a", "H0b", "H0c", "stop_rule"} <= set(res["verdicts"]))
+    check("site_sim.py: self-check passes, every draw recorded, resume adds nothing, rerun refused, verdicts written",
+          code_s == 0 and "Self-check: val AUC" in log_s and draws_ok)
+
+    # screening.py building blocks, site_study.py (E1-E4), screen.py (the tool), grade_report from a CSV alone.
+    from screening import _checks as screening_checks
+    for name, ok in screening_checks().items():
+        check(f"screening.py: {name}", ok)
+    clinic_csv = os.path.join(tmp, "clinic.csv")
+    pd.read_csv(os.path.join(sim_data, "trainLabels.csv")).to_csv(clinic_csv, index=False)
+    sealed_csv = os.path.join(tmp, "sealed.csv")
+    pd.DataFrame({"image": ["no_such_photo"]}).to_csv(sealed_csv, index=False)
+    study = os.path.join(tmp, "study")
+    study_args = ["site_study.py", "--run", sim_run, "--clinic-labels", clinic_csv, "--clinic-images", sim_img,
+                  "--sealed", sealed_csv, "--out", study, "--rates", "0.1", "0.4", "--n-setup", "12", "--draws", "1",
+                  "--batch", "8"]
+    code_t, log_t = run(study_args)
+    if code_t != 0:
+        print(log_t[-3000:])
+    methods = set(pd.read_csv(os.path.join(study, "draws.csv"))["method"]) if code_t == 0 else set()
+    pd.DataFrame({"image": [pd.read_csv(clinic_csv)["image"].iloc[3]]}).to_csv(sealed_csv, index=False)
+    code_t2, log_t2 = run(study_args[:-2] + ["--out", os.path.join(tmp, "study2")])
+    check("site_study.py: every method recorded per draw, sealed photos refused",
+          code_t == 0 and {"M1", "M2", "M3", "M5", "REF", "M4+0.00"} <= methods
+          and code_t2 != 0 and "sealed" in log_t2)
+    code_u, log_u = run(["tta.py", "--run", sim_run, "--images", sim_img, "--workers", "0"])
+    site = os.path.join(tmp, "site_screen")
+    answers = os.path.join(tmp, "answers.csv")
+    code_u2, log_u2 = run(["screen.py", "setup", "--tta-run", sim_run + "_tta", "--images", sim_img, "--out", site,
+                           "--min-photos", "20"])
+    code_u3, log_u3 = run(["screen.py", "screen", "--site", site, "--images", sim_img, "--out", answers])
+    ans = pd.read_csv(answers) if code_u3 == 0 else None
+    check("screen.py: set-up with ungraded photos, four answers per photo, unsure only near the cutoff or on disagreement",
+          code_u == 0 and code_u2 == 0 and code_u3 == 0
+          and set(ans["answer"]) <= {"clear", "refer", "unsure_refer", "cannot_read"}
+          and ((ans["answer"] == "clear") <= ans["views_agree"]).all())
+    only_csv = os.path.join(tmp, "csv_only")
+    os.makedirs(only_csv)
+    shutil.copy(os.path.join(sim_run, "val_predictions.csv"), only_csv)
+    code_g1, log_g1 = run(["grade_report.py", sim_run, "--n-boot", "50"])
+    code_g2, log_g2 = run(["grade_report.py", only_csv, "--n-boot", "50"])
+    check("grade_report.py: from the predictions file alone, same kappa as with best.pt",
+          code_g1 == 0 and code_g2 == 0 and log_g1.splitlines()[-1] == log_g2.splitlines()[-1]
+          and "quadratic weighted kappa" in log_g2)
+
 
 def test_vit():
     from vit import _checks

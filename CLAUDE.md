@@ -77,6 +77,37 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   EyePACS validation (no both-eyes, as external_test.py without `--pairs`). `score --site runs\site_X --images
   <photos> --out file.csv`: 8-view TTA with the adapted copies, standardized like validation, referred at both
   cutoffs. Reports nothing about accuracy (no grades): measuring AdaBN stays `external_test.py --adapt-bn`'s job.
+- `site_sim.py` (E0 of `PREREG.md`): pretend clinics from EyePACS VALIDATION eyes, to see whether AdaBN's effect
+  depends on the clinic's disease rate. Validation patients split in halves (seed 0): a set-up pool and a scored
+  clinic (its sick eyes + 1,000 healthy). Each draw: N ungraded set-up photos at sick share p (grades only build
+  the batch), then M1 AdaBN and M3 score reset are judged at the plain-view 90%-sensitivity cutoff (recomputed on
+  all validation eyes; self-check: AUC = the run's val_predictions.csv). Plus a fixed fake camera (gamma 1.3,
+  blur 1.0, JPEG 40). Plain view, CPU-friendly (~20 photos/s on 4 cores); resumable (draws.csv); writes
+  e0_results.json with the registered verdicts; refuses a finished folder.
+- `site_study.py` (E1-E4 of the plan): pretend clinics on ANOTHER clinic's graded photos (halves by patient; set-up
+  batches at sick share p and size N, grades only build the batch). Methods: M1 AdaBN, M2 blended AdaBN
+  (`--prior-n`), M3 score reset, M4 referral-rate reset from a stated rate (`--stated-offset`), M5 AdaBN + EM
+  estimate of the batch's disease rate, REF graded reset (yardstick, not label-free); every row also has the
+  "unsure, refer" readouts. Reference (cutoff, scale, Platt fit) from EyePACS validation only. Refuses `--sealed`
+  photos; resumable; writes draws.csv + results.json (no verdicts: those are registered before each run).
+- `screening.py`: hand-written blocks shared by site_study.py and screen.py: blended BatchNorm, Platt fit + EM
+  disease-rate estimate (Saerens 2002), rate cutoff, unsure band (share of validation eyes near the cutoff) and
+  8-view disagreement. `python screening.py` runs its CPU checks (also in selftest).
+- `screen.py`: the screener as one tool. `setup` (ungraded clinic photos): AdaBN + quality reference re-measured on
+  the clinic's photos with the adapted model (cloud from one half, limit from the other); cutoff, scale and unsure
+  band copied from EyePACS validation. `screen`: one answer per photo: cannot_read / clear / refer / unsure_refer.
+  Measures nothing (no grades).
+- `convert_deepdrid.py`: DeepDRiD (CC BY-SA 4.0, Shanghai, 2,000 photos of 500 patients, 2 photos per eye, DR grade +
+  quality labels) -> flat folders per part + labels CSV (`dd<patient>_<view>` names). Parts: train 1,200 + eval 400
+  = the fresh clinic for E1-E3; sealed 400 (the challenge's validation part) = the final screener run only.
+- `convert_paraguay.py`: the Paraguay set (Zenodo 4647952 v0.2, CC BY 4.0, 757 photos, Zeiss Visucam) 7-step
+  grade folders -> 0-4 labels CSV; each photo its own patient. 187 grade 0 only: E1 only.
+- `convert_sustech.py`: the SUSTech-SYSU set (figshare 12570770, CC BY 4.0, Shenzhen, 1,219 photos, cite Lin et al. 2020)
+  -> flat folder + labels CSV (`su<nnnn>` names); grade 5 (laser scars) replaced by the dataset's own 0-4 re-grades.
+  631 grade 0, 46% referable; each photo its own patient (eye side only). Fresh clinic: E1-E3.
+- `kaggle_e0.ipynb`: E0 without the laptop: on a Kaggle GPU from any browser, preprocess (512, enhance, tight
+  mask), train the exp8 recipe as `kexp8` (~4.5 h), then `site_sim.py` (PREREG.md amendment 1). Save & Run All.
+- `PREREG.md`: the registered hypotheses and rules of the clinic set-up study, committed before each run.
 - `convert_ddr.py`: DDR's grading labels (`DR_grading/{train,valid,test}.txt`, lines `<file> <grade>`) -> one CSV
   `image,level` for `--extra-labels`; drops grade 5 (ungradable) and label lines without a photo; refuses duplicate
   names and grades outside 0-5. All of DDR is training data (our validation/test stay pure EyePACS).

@@ -53,6 +53,16 @@ def load_cutpoints(run_dir):
     return loss, run
 
 
+def has_checkpoint(run_dir):
+    """True if best.pt is in the run folder or in the run a TTA folder points to."""
+    if os.path.exists(os.path.join(run_dir, "best.pt")):
+        return True
+    try:
+        return os.path.exists(os.path.join(source_run(run_dir), "best.pt"))
+    except (SystemExit, OSError, KeyError, ValueError):
+        return False
+
+
 def weighted_kappa(true, pred, weight=None, k=NUM_GRADES):
     """
     Quadratic weighted kappa (Cohen 1968), written out:
@@ -81,14 +91,23 @@ def main():
     args = p.parse_args()
 
     df = load_predictions(args.run, args.split)
-    loss, run = load_cutpoints(args.run)
-    with torch.no_grad():
-        pred = loss.predicted_grade(torch.tensor(df["score"].to_numpy(dtype=np.float64))).numpy()
-        cuts = loss.cutpoints().numpy()
+    if has_checkpoint(args.run):
+        loss, run = load_cutpoints(args.run)
+        with torch.no_grad():
+            pred = loss.predicted_grade(torch.tensor(df["score"].to_numpy(dtype=np.float64))).numpy()
+            cuts = loss.cutpoints().numpy()
+        source = f"cutpoints from {run}: " + ", ".join(f"grade > {k} at score {-c:+.2f}" for k, c in enumerate(cuts))
+    elif "predicted_grade" in df:
+        # No best.pt next to the predictions (e.g. only the CSV was copied off the laptop): train.py
+        # already wrote each eye's grade, read off the same cutpoints, into the predictions file.
+        pred = df["predicted_grade"].to_numpy()
+        source = "grades as saved in the predictions file by train.py (no best.pt found)"
+    else:
+        raise SystemExit(f"No best.pt for {args.run} and no predicted_grade column in its predictions: "
+                         "copy the run's best.pt next to it (runs trained before the column existed need it).")
     true = df["level"].to_numpy()
 
-    print(f"{args.run} ({args.split}, {len(df)} eyes); cutpoints from {run}: "
-          + ", ".join(f"grade > {k} at score {-c:+.2f}" for k, c in enumerate(cuts)))
+    print(f"{args.run} ({args.split}, {len(df)} eyes); {source}")
     table = pd.crosstab(pd.Series(true, name="true"), pd.Series(pred, name="predicted")) \
         .reindex(index=range(NUM_GRADES), columns=range(NUM_GRADES), fill_value=0)
     print("\nConfusion table (rows: true grade, columns: predicted grade):")
