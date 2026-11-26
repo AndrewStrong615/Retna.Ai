@@ -261,6 +261,18 @@ color fundus photos in the Kaggle EyePACS dataset (`trainLabels.csv`: columns `i
   is ~270), so on a colour photo the correction is probably WRONG: out of domain, as warned. Until there are far
   more pairs (and colour ones), the atlas stays the more honest estimate for a colour photo.
   model.pt and the pairs are kept in the project's shared files (`photo2oct/olives_net/`), never in the repo.
+  NEXT STEP (2026-11-25/26, andrew: "how can I make it actually learn"; he chose his OWN pre1 encoder over an outside
+  model such as RETFound, so the no-outside-weights rule stands here too). Code: `etdrs_masks` / `sector_means` (the 9
+  ETDRS sectors: centre 1 mm, inner ring to 3 mm, outer ring to 6 mm, each ring in 4 quarters; disc side = left);
+  `train --sector-weight W` adds W x the error of the 9 sector averages to the loss; sector errors (all 9, centre alone,
+  centre correlation) are always reported for network, atlas and mean map. `train --arch resnet18 [--init
+  runs\pre1\encoder.pt] [--encoder-lr 0.1]`: `build_encoder_net` = model.py's ResNet-18 stem + stages 1-3 (picture
+  enlarged to 256 px) with a small up-path on top, last layer zero; the pretrained part learns at 0.1 x the rate (0 =
+  frozen). Sector results on VALIDATION (13 patients): the final map network above already reads sectors better than
+  the averages: 24.6 um vs atlas 29.1 / mean map 33.8; centre sector 43 vs 52 / 64, centre correlation 0.50. So it
+  HAS learned something coarse ("is the middle swollen"), which the per-cell error hid. Adding the sector loss
+  (`--augment --sector-weight 1`, 60 epochs, validation only) did NOT help: map 26.9, sectors 26.5, centre 45.8.
+  Coarser targets alone are not the fix. Pretrained-encoder run: waiting for encoder.pt from the laptop.
 - `analyze.py`: offline analysis from the predictions CSVs (no GPU). One run: AUC, sensitivity, specificity with
   95% ranges (bootstrap by patient), share referred per grade, per-patient numbers. Two runs: paired comparison
   on the same validation eyes with a verdict; `--noise-floor` adds measured seed-to-seed noise. Comparisons are

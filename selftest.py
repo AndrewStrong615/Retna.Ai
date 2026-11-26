@@ -993,6 +993,52 @@ def test_convert_olives(tmp):
           and torch.allclose(torch.nn.functional.avg_pool2d(xa[:, :1], 2)[:, 0], ya, atol=1e-6))
 
 
+def test_photo2oct_sectors_encoder(tmp):
+    """photo2oct.py: the 9 ETDRS sectors and the network built on this project's own ResNet-18."""
+    import photo2oct as p2o
+    from model import build_model
+    masks = p2o.etdrs_masks()
+    c = (np.arange(64) + 0.5) / 64 * 6 - 3
+    x, y = np.meshgrid(c, c)
+    inside = np.hypot(x, y) < 3
+    ramp = np.broadcast_to(300 - 20 * x, (1, 64, 64)).astype(np.float32)          # thicker toward the left = the disc side
+    sec = p2o.sector_means(ramp)[0]
+    check("photo2oct: the 9 ETDRS sectors are 9 separate areas that tile the 6 mm circle; on a map that thickens toward "
+          "the disc side the 'disc side' sectors read thicker than the 'far side' ones and upper = lower",
+          masks.shape == (9, 64, 64) and np.allclose(masks.sum(axis=(1, 2)), 1) and ((masks > 0).sum(axis=0) == inside).all()
+          and sec[1] > sec[0] > sec[3] and sec[5] > sec[7] and abs(sec[2] - sec[4]) < 2 and abs(sec[0] - 300) < 1)
+    resnet = build_model(18, "gem")
+    state = {k: v + 0.01 for k, v in resnet.state_dict().items() if k.startswith(("stem.", "stages."))}
+    net = p2o.build_encoder_net(state).eval()
+    with torch.no_grad():
+        first = net(torch.randn(2, 3, 128, 128))
+    try:
+        p2o.build_encoder_net({"nonsense": torch.zeros(1)})
+        refused = False
+    except SystemExit:
+        refused = True
+    check("photo2oct: the ResNet-18 network takes pretrain.py's encoder weights (stem + stages), answers 64 x 64, "
+          "untrained = exactly the atlas (correction 0), and refuses weights that do not fit",
+          first.shape == (2, 1, 64, 64) and float(first.abs().max()) == 0
+          and torch.equal(net.stem[0].weight, state["stem.0.weight"])
+          and refused)
+    pairs, out = os.path.join(tmp, "p2o_pairs_small"), os.path.join(tmp, "p2o_resnet")
+    run(["photo2oct.py", "synthetic-pairs", "--out", pairs, "--eyes", "60"])
+    enc = os.path.join(tmp, "p2o_encoder.pt")
+    torch.save({"encoder": state, "arch": {"depth": 18, "pool": "gem"}, "epoch": 1}, enc)
+    code, log = run(["photo2oct.py", "train", "--pairs", pairs, "--out", out, "--epochs", "1", "--arch", "resnet18", "--init", enc,
+                     "--sector-weight", "1", "--augment"])
+    res = json.load(open(os.path.join(out, "results.json"))) if code == 0 else {}
+    photo = os.path.join(tmp, "p2o_photo.png")
+    code2, log2 = run(["photo2oct.py", "estimate", "--photo", photo, "--out", os.path.join(tmp, "p2o_est_resnet"),
+                       "--model", os.path.join(out, "model.pt")]) if os.path.exists(photo) else (0, "")
+    bad, _ = run(["photo2oct.py", "train", "--pairs", pairs, "--out", out + "_bad", "--epochs", "1", "--init", enc])
+    check("photo2oct train --arch resnet18 --init: runs from an encoder file, reports the sector errors, the saved model "
+          "is read back by estimate; --init without --arch resnet18 is refused",
+          code == 0 and code2 == 0 and bad != 0 and res.get("arch") == "resnet18" and res.get("init", {}).get("pretrain_epoch") == 1
+          and "network" in res.get("test_sectors", {}), (log + log2)[-300:])
+
+
 def test_vit():
     from vit import _checks
     for name, ok in _checks().items():
@@ -1009,6 +1055,7 @@ def main():
         test_oct3d(tmp)
         test_photo2oct(tmp)
         test_convert_olives(tmp)
+        test_photo2oct_sectors_encoder(tmp)
         test_end_to_end(tmp)
     print()
     if failures:

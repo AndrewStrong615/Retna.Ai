@@ -273,6 +273,89 @@ def build_net():
     return ThicknessNet()
 
 
+def build_encoder_net(encoder_state=None):
+    """
+    The second network: the project's OWN ResNet-18 (model.py) as the part that looks, with a
+    small hand-written part on top that draws the 64 x 64 correction.
+      - `encoder_state`: the `encoder` weights from pretrain.py's encoder.pt (stem + stages, learned
+        by this project from ~78,000 unlabeled EyePACS photos by redrawing hidden squares). They
+        already know what vessels, spots and textures look like, so the few OLIVES patients only
+        have to teach "which of those go with a thicker retina", not "how to see" from nothing.
+        None = the same network from random weights (to measure what the pretraining adds).
+      - the 128 px picture is enlarged to 256 px first, so the ResNet's 1/4, 1/8 and 1/16 size
+        feature maps are 64, 32 and 16 px: the same sizes ThicknessNet works at. Stage 4 (1/32)
+        is not used: whole-eye summaries matter for a disease score, less for a local map.
+      - going up as in ThicknessNet (skip connections), last layer zero: untrained = the atlas.
+    11.2M weights minus stage 4 = ~2.8M in the encoder, ~0.5M on top.
+    """
+    import torch
+    from torch import nn
+    from model import build_model
+
+    def block(cin, cout):
+        return nn.Sequential(nn.Conv2d(cin, cout, 3, 1, 1, bias=False), nn.BatchNorm2d(cout), nn.ReLU(inplace=True),
+                             nn.Conv2d(cout, cout, 3, 1, 1, bias=False), nn.BatchNorm2d(cout), nn.ReLU(inplace=True))
+
+    class EncoderNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            resnet = build_model(18, "gem")
+            if encoder_state is not None:
+                missing, unexpected = resnet.load_state_dict(encoder_state, strict=False)
+                bad = [k for k in missing if not k.startswith(("head.", "pool."))]
+                if bad or unexpected:
+                    raise SystemExit(f"The encoder does not fit model.py's ResNet-18: missing {bad[:4]}, unexpected {unexpected[:4]}")
+            self.stem, self.s1, self.s2, self.s3 = resnet.stem, resnet.stages[0], resnet.stages[1], resnet.stages[2]
+            self.u2, self.u1 = block(256 + 128, 64), block(64 + 64, 32)
+            self.out = nn.Conv2d(32, 1, 1)
+            nn.init.zeros_(self.out.weight)
+            nn.init.zeros_(self.out.bias)
+            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+
+        def encoder_parameters(self):
+            return [q for m in (self.stem, self.s1, self.s2, self.s3) for q in m.parameters()]
+
+        def forward(self, x):                      # x: [batch, 3, 128, 128]
+            a = self.s1(self.stem(self.up(x)))     # 64 channels, 64 px
+            b = self.s2(a)                         # 128 channels, 32 px
+            c = self.s3(b)                         # 256 channels, 16 px
+            b = self.u2(torch.cat([self.up(c), b], dim=1))
+            a = self.u1(torch.cat([self.up(b), a], dim=1))
+            return self.out(a)                     # [batch, 1, 64, 64]
+
+    return EncoderNet()
+
+
+SECTOR_NAMES = ["centre", "inner disc side", "inner upper", "inner far side", "inner lower",
+                "outer disc side", "outer upper", "outer far side", "outer lower"]
+
+
+def etdrs_masks(size=OUT_PX, field_mm=FIELD_MM):
+    """
+    The 9 ETDRS sectors eye doctors read a thickness map by, as weights [9, size, size] (each sums
+    to 1, so `sector_means` is a weighted average): the centre circle (1 mm across), an inner ring
+    (out to 3 mm across) and an outer ring (out to 6 mm across), each ring cut into 4 quarters.
+    The picture has the disc on the LEFT, so 'disc side' (nasal) is left and 'far side' (temporal) right.
+    Why bother: one number per sector averages away what no photo can tell (the exact place of an
+    edge, a single cyst), and keeps what a treatment decision uses (is the centre thick?).
+    """
+    c = (np.arange(size) + 0.5) / size * field_mm - field_mm / 2
+    x, y = np.meshgrid(c, c)
+    r = np.hypot(x, y)
+    angle = np.degrees(np.arctan2(-y, -x)) % 360       # 0 = toward the disc (left), 90 = up, 180 = far side, 270 = down
+    masks = [r < 0.5]
+    for lo, hi in ((0.5, 1.5), (1.5, 3.0)):
+        for quarter in range(4):
+            masks.append((r >= lo) & (r < hi) & ((angle - 90 * quarter + 45) % 360 < 90))
+    m = np.stack(masks).astype(np.float32)
+    return m / m.sum(axis=(1, 2), keepdims=True)
+
+
+def sector_means(maps, masks=None):
+    """Thickness maps [n, 64, 64] (numpy) -> the 9 sector averages [n, 9]."""
+    return np.einsum("khw,nhw->nk", etdrs_masks() if masks is None else masks, maps)
+
+
 def to_input(crop_rgb, grey=False):
     """
     128 x 128 RGB crop (uint8, disc side on the LEFT) -> network input [3, 128, 128], about -1..1.
@@ -302,7 +385,7 @@ def predict_thickness(model_path, crop_rgb):
     """Atlas + the trained network's correction, for one crop (disc side on the left). Returns um, 64 x 64."""
     import torch
     saved = torch.load(model_path, map_location="cpu", weights_only=False)
-    net = build_net()
+    net = build_encoder_net() if saved.get("meta", {}).get("arch") == "resnet18" else build_net()
     net.load_state_dict(saved["model"])
     net.eval()
     with torch.no_grad():
@@ -432,7 +515,8 @@ def augmented(x, y, rng, max_shift=4):
     return torch.stack(xs), torch.stack(ys)
 
 
-def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=False, wd=1e-4, test=True):
+def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=False, wd=1e-4, test=True,
+          sector_weight=0.0, arch="unet", init=None, encoder_lr=0.1):
     """
     Train ThicknessNet on a pairs folder. Loss: mean absolute error (L1) between the
     predicted and the real thickness map, in um / 100.
@@ -444,6 +528,12 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=F
     A network that does not clearly beat both has learned nothing from the photo.
     The same two yardsticks are also reported on the VALIDATION patients, to judge a recipe without the test.
     augment: see `augmented` (off = the plain loop, same numbers as before). wd: weight decay.
+    sector_weight W (0 = off, the old loss): adds W x the mean absolute error of the 9 ETDRS sector averages
+    to the loss, so the network is also paid for getting each region's AVERAGE right, not only each cell.
+    The sector errors of network, atlas and mean map are reported either way.
+    arch "resnet18": build_encoder_net instead of ThicknessNet; `init` = pretrain.py's encoder.pt (this
+    project's own pretrained weights; none = random start). The pretrained part then learns with
+    `encoder_lr` x the learning rate (0.1: it already knows a lot, big steps would wipe that out; 0 = frozen).
     test=False: do not look at the test patients at all (for trying recipes; choose on validation, then
     run the chosen recipe once with the test).
     """
@@ -457,10 +547,40 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=F
     atlas = atlas_thickness(OUT_PX, "left")
     resid = (y - atlas)[:, None] / RESID_UM                              # what the network must answer
     torch.manual_seed(seed)
-    net = build_net()
-    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=wd)
     steps = epochs * int(np.ceil(tr.sum() / batch))
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps)   # warm-up, then a cosine fall
+    init_info = None
+    if arch == "resnet18":
+        state = None
+        if init:
+            pre = torch.load(init, map_location="cpu", weights_only=False)
+            if pre.get("arch", {}).get("depth", 18) != 18:
+                raise SystemExit(f"{init} is not a ResNet-18 encoder ({pre.get('arch')}).")
+            state, init_info = pre["encoder"], {"file": os.path.basename(init), "pretrain_epoch": pre.get("epoch")}
+            log(f"Starting from this project's pretrained encoder {init} (pretraining epoch {pre.get('epoch')})")
+        net = build_encoder_net(state)
+        enc = net.encoder_parameters()
+        enc_ids = {id(q) for q in enc}
+        rest = [q for q in net.parameters() if id(q) not in enc_ids]
+        if init and encoder_lr == 0:
+            for q in enc:
+                q.requires_grad_(False)                                   # frozen: only the part on top learns
+            groups, max_lr = [{"params": rest}], lr
+        elif init:
+            groups, max_lr = [{"params": enc}, {"params": rest}], [lr * encoder_lr, lr]
+        else:
+            groups, max_lr = [{"params": enc + rest}], lr
+        opt = torch.optim.AdamW(groups, lr=lr, weight_decay=wd)
+    else:
+        if init:
+            raise SystemExit("--init needs --arch resnet18 (ThicknessNet has no pretrained version).")
+        net, max_lr = build_net(), lr
+        opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=wd)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=max_lr, total_steps=steps)   # warm-up, then a cosine fall
+    masks = etdrs_masks()
+    masks_t = torch.from_numpy(masks)
+
+    def sectors_t(maps):                                                  # [n, 64, 64] tensor -> [n, 9]
+        return torch.einsum("khw,nhw->nk", masks_t, maps)
     xt, rt = torch.from_numpy(x), torch.from_numpy(resid.astype(np.float32))
     yt, atlas_t = torch.from_numpy(y), torch.from_numpy(atlas)
     idx_tr = np.nonzero(tr)[0]
@@ -468,8 +588,9 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=F
 
     def mae(mask):                                                        # um, mean over the masked pairs
         net.eval()
-        with torch.no_grad():
-            pred = net(xt[np.nonzero(mask)[0]])[:, 0].numpy() * RESID_UM + atlas
+        idx = np.nonzero(mask)[0]
+        with torch.no_grad():                                             # in pieces: the ResNet needs more memory
+            pred = np.concatenate([net(xt[idx[i:i + 128]])[:, 0].numpy() for i in range(0, len(idx), 128)]) * RESID_UM + atlas
         return float(np.abs(pred - y[mask]).mean()), pred
 
     best, history, best_state = 1e9, [], None
@@ -481,29 +602,52 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=F
             pick = order[start:start + batch]
             if augment:
                 xb, yb = augmented(xt[pick], yt[pick], rng)
-                loss = (net(xb) - ((yb - atlas_t) / RESID_UM)[:, None]).abs().mean()
+                out_b, want = net(xb), ((yb - atlas_t) / RESID_UM)[:, None]
             else:
-                loss = (net(xt[pick]) - rt[pick]).abs().mean()
+                out_b, want = net(xt[pick]), rt[pick]
+            loss = (out_b - want).abs().mean()
+            if sector_weight:
+                loss = loss + sector_weight * (sectors_t(out_b[:, 0]) - sectors_t(want[:, 0])).abs().mean()
             opt.zero_grad()
             loss.backward()
             opt.step()
             sched.step()
             losses.append(float(loss.detach()))
-        val_mae, _ = mae(va)
-        history.append({"epoch": epoch, "train_loss_um": float(np.mean(losses)) * RESID_UM, "val_mae_um": val_mae})
+        val_mae, val_pred = mae(va)
+        history.append({"epoch": epoch, "train_loss_um": float(np.mean(losses)) * RESID_UM, "val_mae_um": val_mae,
+                        "val_sector_mae_um": float(np.abs(sector_means(val_pred, masks) - sector_means(y[va], masks)).mean())})
         if val_mae < best:
             best, best_state = val_mae, {k: v.clone() for k, v in net.state_dict().items()}
         if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
             log(f"epoch {epoch:3d}: train L1 {history[-1]['train_loss_um']:.1f} um, validation error {val_mae:.1f} um")
     net.load_state_dict(best_state)
     mean_map = y[tr].mean(axis=0)
-    results = {"pairs": len(y), "patients": len(set(patients)), "train/val/test pairs": [int(tr.sum()), int(va.sum()), int(te.sum())],
+
+    def sector_report(mask, pred):
+        """Mean error of the 9 sector averages (um), all sectors and the centre alone: network, atlas, mean map."""
+        truth = sector_means(y[mask], masks)
+        rows = {}
+        for name, guess in (("network", pred), ("atlas", atlas[None]), ("mean_map", mean_map[None])):
+            err = np.abs(sector_means(guess, masks) - truth)
+            rows[name] = {"all_um": float(err.mean()), "centre_um": float(err[:, 0].mean())}
+        rows["centre_correlation"] = float(np.corrcoef(sector_means(pred, masks)[:, 0], truth[:, 0])[0, 1])
+        return rows
+
+    _, val_pred = mae(va)
+    val_sectors = sector_report(va, val_pred)
+    results = {"arch": arch, "init": init_info, "encoder_lr": encoder_lr if init else None, "sector_weight": sector_weight,
+               "val_sectors": val_sectors, "pairs": len(y), "patients": len(set(patients)), "train/val/test pairs": [int(tr.sum()), int(va.sum()), int(te.sum())],
                "augment": bool(augment), "wd": wd, "lr": lr,
                "best_val_mae_um": best, "best_epoch": int(np.argmin([h["val_mae_um"] for h in history])) + 1,
                "val_mae_atlas_um": float(np.abs(atlas - y[va]).mean()),
                "val_mae_mean_map_um": float(np.abs(mean_map - y[va]).mean())}
     log(f"VALIDATION patients: network {best:.1f} um (best epoch {results['best_epoch']}) | atlas for everyone "
         f"{results['val_mae_atlas_um']:.1f} um | mean training map {results['val_mae_mean_map_um']:.1f} um")
+    log(f"  the 9 ETDRS sector averages: network {val_sectors['network']['all_um']:.1f} um | atlas "
+        f"{val_sectors['atlas']['all_um']:.1f} | mean map {val_sectors['mean_map']['all_um']:.1f}; centre sector alone: "
+        f"{val_sectors['network']['centre_um']:.1f} | {val_sectors['atlas']['centre_um']:.1f} | "
+        f"{val_sectors['mean_map']['centre_um']:.1f} (network's centre follows the real one with correlation "
+        f"{val_sectors['centre_correlation']:.2f})")
     if not test:
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, "results_val_only.json"), "w") as f:
@@ -515,11 +659,16 @@ def train(pairs, out, epochs=30, batch=32, lr=2e-3, seed=0, log=print, augment=F
                "test_mae_atlas_um": float(np.abs(atlas - y[te]).mean()),
                "test_mae_mean_map_um": float(np.abs(mean_map - y[te]).mean()),
                "test_peak_error_um": float(np.abs(pred.max(axis=(1, 2)) - y[te].max(axis=(1, 2))).mean()),
-               "test_peak_error_atlas_um": float(np.abs(atlas.max() - y[te].max(axis=(1, 2))).mean())})
+               "test_peak_error_atlas_um": float(np.abs(atlas.max() - y[te].max(axis=(1, 2))).mean()),
+               "test_sectors": sector_report(te, pred)})
     os.makedirs(out, exist_ok=True)
     notes = pairs_info(pairs)
     meta = {"pairs_folder": os.path.basename(os.path.normpath(pairs)), "epochs": epochs, "seed": seed,
             "input": notes.get("input", "colour"), "source": notes.get("source"), **results}
+    ts = results["test_sectors"]
+    log(f"TEST, the 9 sector averages: network {ts['network']['all_um']:.1f} um | atlas {ts['atlas']['all_um']:.1f} | mean map "
+        f"{ts['mean_map']['all_um']:.1f}; centre alone: {ts['network']['centre_um']:.1f} | {ts['atlas']['centre_um']:.1f} | "
+        f"{ts['mean_map']['centre_um']:.1f} (correlation {ts['centre_correlation']:.2f})")
     torch.save({"model": best_state, "meta": meta}, os.path.join(out, "model.pt"))
     with open(os.path.join(out, "results.json"), "w") as f:
         json.dump({**results, "history": history}, f, indent=2)
@@ -765,6 +914,10 @@ def main():
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--augment", action="store_true", help="flip upside down and shift each training pair at random")
     t.add_argument("--wd", type=float, default=1e-4, help="weight decay")
+    t.add_argument("--sector-weight", type=float, default=0.0, help="add this x the error of the 9 ETDRS sector averages to the loss")
+    t.add_argument("--arch", choices=["unet", "resnet18"], default="unet", help="unet = ThicknessNet; resnet18 = model.py's ResNet as encoder")
+    t.add_argument("--init", help="pretrain.py's encoder.pt (this project's own pretrained weights), with --arch resnet18")
+    t.add_argument("--encoder-lr", type=float, default=0.1, help="the pretrained part's learning rate as a share of --lr (0 = frozen)")
     t.add_argument("--no-test", action="store_true", help="validation only, nothing saved: for choosing a recipe")
     args = p.parse_args()
     if args.cmd == "estimate":
@@ -780,7 +933,8 @@ def main():
         print(f"Pair added to {args.pairs}")
     else:
         train(args.pairs, args.out, args.epochs, args.batch, args.lr, args.seed, augment=args.augment, wd=args.wd,
-              test=not args.no_test)
+              test=not args.no_test, sector_weight=args.sector_weight, arch=args.arch, init=args.init,
+              encoder_lr=args.encoder_lr)
 
 
 if __name__ == "__main__":
